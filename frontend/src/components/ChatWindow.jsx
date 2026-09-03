@@ -83,7 +83,7 @@ function ChatWindow({
       // ---------------------------------------------------------
 
       if (
-        cartId &&
+        result.cart_changed &&
         onCartChanged
       ) {
         try {

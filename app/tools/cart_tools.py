@@ -27,18 +27,22 @@ def get_cart(cart_id: str) -> dict:
         cart_id: Shopify cart ID.
 
     Returns:
-        Current cart contents and totals.
+        Standardized cart-tool response with success flag
+        and the current Shopify cart payload.
     """
     client = ShopifyCartClient()
     cart = client.get_cart(cart_id)
 
     if cart is None:
         return {
+            "success": False,
             "found": False,
             "message": "Cart not found.",
+            "cart": None,
         }
 
     return {
+        "success": True,
         "found": True,
         "cart": cart,
     }

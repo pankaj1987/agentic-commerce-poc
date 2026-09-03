@@ -13,9 +13,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-
     success: bool
-
     response: str
-
     cart_id: str | None = None
+    cart_changed: bool = False

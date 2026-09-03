@@ -1,6 +1,11 @@
+from dotenv import load_dotenv
+load_dotenv()
+import os
 import logging
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app.config.observability import validate_langsmith
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.product_routes import router as product_router
@@ -18,6 +23,16 @@ logging.basicConfig(
     ),
 )
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    # Runs once when FastAPI starts
+    validate_langsmith()
+
+    yield
+
+    # Runs once when FastAPI shuts down
+    # Add cleanup here later if required
 
 app = FastAPI(
     title="Agentic Commerce API",
@@ -26,6 +41,7 @@ app = FastAPI(
         "LangChain, Shopify and RAG"
     ),
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 

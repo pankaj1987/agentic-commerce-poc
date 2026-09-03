@@ -1,11 +1,10 @@
 import logging
-import re
 from typing import Any
 
 from fastapi.concurrency import run_in_threadpool
 
-from app.agents.cart_agent import cart_agent
-from app.agents.product_agent import product_agent
+from app.graph.commerce_graph import commerce_graph
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,192 +19,202 @@ class ChatService:
         message: str,
         cart_id: str | None = None,
     ) -> dict[str, Any]:
+        """
+        Process the user request through LangGraph.
+
+        ChatService no longer performs agent routing directly.
+        Product, knowledge and cart routing is handled by
+        commerce_graph.
+        """
+
         logger.info(
             "Processing chat message=%r cart_id_present=%s",
             message,
             bool(cart_id),
         )
 
-        # --------------------------------------------------------
-        # Determine which agent should handle the request
-        # --------------------------------------------------------
-        is_cart_request = ChatService._is_cart_request(message)
-
-        if is_cart_request:
-            logger.info("Routing request to Cart Agent.")
-            agent_message = message
-
-            if cart_id:
-                agent_message = (
-                    f"{message}\n\n"
-                    "CURRENT SHOPIFY CART CONTEXT:\n"
-                    f"cart_id={cart_id}\n\n"
-                    "Use this cart ID for all cart operations. "
-                    "Do not ask the customer for another cart ID."
-                )
-
-                logger.info(
-                    "Invoking Cart Agent with cart context present=%s",
-                    bool(cart_id),
-                )
-
-            result = await run_in_threadpool(
-                cart_agent.invoke,
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": agent_message,
-                        }
-                    ]
-                },
-            )
-        else:
-            logger.info("Routing request to Product Agent.")
-            result = await run_in_threadpool(
-                product_agent.invoke,
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": message,
-                        }
-                    ]
-                },
+        if not message or not message.strip():
+            raise ValueError(
+                "Chat message cannot be empty."
             )
 
-        logger.info("Agent execution completed.")
-
         # --------------------------------------------------------
-        # Extract final agent message
+        # INITIAL LANGGRAPH STATE
         # --------------------------------------------------------
-        messages = result.get("messages", [])
-        if not messages:
-            raise RuntimeError("Agent returned no messages.")
 
-        final_message = messages[-1]
+        initial_state = {
+            "user_message": message.strip(),
+            "cart_id": cart_id,
+            "intent": "unknown",
+            "cart_action": "unknown",
+            "cart_changed": False,
+            "error": None,
+        }
 
-        # --------------------------------------------------------
-        # Normalize formats into a plain string.
-        # --------------------------------------------------------
-        response_content = ChatService._extract_message_text(final_message)
-
-        logger.info("Final message type: %s", type(final_message).__name__)
-        logger.info("Final message content: %r", final_message.content)
         logger.info(
-            "Final message additional_kwargs: %r",
-            getattr(final_message, "additional_kwargs", None),
+            "Invoking CommerceGraph."
         )
+
+        try:
+            result = await run_in_threadpool(
+                commerce_graph.invoke,
+                initial_state,
+            )
+
+        except Exception:
+            logger.exception(
+                "CommerceGraph execution failed."
+            )
+
+            raise RuntimeError(
+                "Unable to process the commerce request."
+            )
+
         logger.info(
-            "Final message response_metadata: %r",
-            getattr(final_message, "response_metadata", None),
+            "CommerceGraph execution completed."
+        )
+
+        # --------------------------------------------------------
+        # EXTRACT GRAPH RESPONSE
+        # --------------------------------------------------------
+
+        if not result:
+            raise RuntimeError(
+                "CommerceGraph returned no result."
+            )
+
+        response_content = result.get(
+            "response"
+        )
+
+        error = result.get(
+            "error"
+        )
+
+        cart_changed = result.get(
+            "cart_changed",
+            False,
+        )
+
+        # --------------------------------------------------------
+        # HANDLE GRAPH ERROR
+        # --------------------------------------------------------
+
+        if not response_content:
+            if error:
+                logger.warning(
+                    "CommerceGraph returned error: %s",
+                    error,
+                )
+
+                raise RuntimeError(
+                    str(error)
+                )
+
+            raise RuntimeError(
+                "CommerceGraph returned an empty response."
+            )
+
+        # --------------------------------------------------------
+        # NORMALIZE RESPONSE
+        # --------------------------------------------------------
+
+        response_content = (
+            ChatService._normalize_response(
+                response_content
+            )
         )
 
         if not response_content:
-            raise RuntimeError("Agent returned an empty final response.")
+            raise RuntimeError(
+                "CommerceGraph returned an empty response."
+            )
 
-        logger.info("Final agent response extracted successfully.")
+        logger.info(
+            (
+                "CommerceGraph response completed. "
+                "intent=%s cart_action=%s "
+                "cart_changed=%s"
+            ),
+            result.get("intent"),
+            result.get("cart_action"),
+            cart_changed,
+        )
+
+        # --------------------------------------------------------
+        # RETURN API RESPONSE
+        # --------------------------------------------------------
 
         return {
             "success": True,
             "response": response_content,
-            "cart_id": cart_id,
+            "cart_id": result.get(
+                "cart_id",
+                cart_id,
+            ),
+            "cart_changed": cart_changed,
         }
 
     # ============================================================
-    # AGENT ROUTING
+    # NORMALIZE GRAPH RESPONSE
     # ============================================================
 
     @staticmethod
-    def _is_cart_request(message: str) -> bool:
-        if not message:
-            return False
+    def _normalize_response(
+        response: Any,
+    ) -> str:
+        """
+        Normalize graph response into a plain string.
 
-        text = message.lower().strip()
+        Most LangGraph nodes should already return strings,
+        but this keeps ChatService defensive against structured
+        LLM responses returned by Product or Knowledge nodes.
+        """
 
-        # Explicit cart references
-        if "cart" in text:
-            return True
+        # Standard string
+        if isinstance(
+            response,
+            str,
+        ):
+            return response.strip()
 
-        # Quantity modification
-        quantity_patterns = [
-            r"\b(change|update|set|increase|decrease)\b.*\b(quantity|qty)\b",
-            r"\b(quantity|qty)\b.*\b(change|update|set|increase|decrease)\b",
-            r"\b(change|update|set)\b.*\bline\b",
-            r"\bline\s+\d+\b.*\b(quantity|qty)\b",
-            r"\b(make)\b.*\b(quantity|qty)\b",
-        ]
-        if any(re.search(pattern, text) for pattern in quantity_patterns):
-            return True
-
-        # Remove/delete item
-        remove_patterns = [
-            r"\b(remove|delete)\b.*\b(item|product|shoe|line)\b",
-            r"\btake\b.*\bout\b",
-        ]
-        if any(re.search(pattern, text) for pattern in remove_patterns):
-            return True
-
-        # Promotion / coupon / discount
-        promotion_keywords = [
-            "promotion",
-            "promo code",
-            "discount code",
-            "coupon",
-            "apply code",
-        ]
-        if any(keyword in text for keyword in promotion_keywords):
-            return True
-
-        return False
-
-    # ============================================================
-    # NORMALIZE LLM RESPONSE
-    # ============================================================
-
-    @staticmethod
-    def _extract_message_text(message: Any) -> str:
-        # 1. Standard content extraction
-        content = getattr(message, "content", None)
-        extracted = ChatService._extract_text_content(content)
-
-        if extracted:
-            return extracted
-
-        # 2. Some LangChain model integrations expose normalized text separately
-        text_value = getattr(message, "text", None)
-        if callable(text_value):
-            try:
-                text_value = text_value()
-            except Exception:
-                text_value = None
-
-        if isinstance(text_value, str):
-            return text_value.strip()
-
-        return ""
-
-    @staticmethod
-    def _extract_text_content(content: Any) -> str:
-        # String response
-        if isinstance(content, str):
-            return content.strip()
-
-        # Structured list of content blocks
-        if isinstance(content, list):
+        # Structured content-block list
+        if isinstance(
+            response,
+            list,
+        ):
             text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    block_text = block.get("text")
-                    if block_text:
-                        text_parts.append(str(block_text))
-                elif isinstance(block, str):
-                    text_parts.append(block)
 
-            return "\n".join(text_parts).strip()
+            for block in response:
+                if isinstance(
+                    block,
+                    str,
+                ):
+                    text_parts.append(
+                        block
+                    )
+
+                elif isinstance(
+                    block,
+                    dict,
+                ):
+                    block_text = block.get(
+                        "text"
+                    )
+
+                    if block_text:
+                        text_parts.append(
+                            str(block_text)
+                        )
+
+            return "\n".join(
+                text_parts
+            ).strip()
 
         # Defensive fallback
-        if content is None:
+        if response is None:
             return ""
 
-        return str(content).strip()
+        return str(
+            response
+        ).strip()
