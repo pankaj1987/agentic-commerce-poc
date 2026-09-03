@@ -15,6 +15,38 @@ def route_intent(
         .strip()
     )
 
+        # --------------------------------------------
+    # CONDITIONAL WORKFLOW
+    # --------------------------------------------
+
+    conditional_patterns = [
+        (
+            r"\bif\b.*"
+            r"\b(in stock|available)\b.*"
+            r"\badd\b"
+        ),
+        (
+            r"\badd\b.*"
+            r"\bif\b.*"
+            r"\b(in stock|available)\b"
+        ),
+        (
+            r"\bonly if\b.*"
+            r"\b(in stock|available)\b"
+        ),
+    ]
+
+    if any(
+        re.search(
+            pattern,
+            text,
+        )
+        for pattern
+        in conditional_patterns
+    ):
+        return {
+            "intent": "conditional"
+        }
     # --------------------------------------------
     # CART
     # --------------------------------------------

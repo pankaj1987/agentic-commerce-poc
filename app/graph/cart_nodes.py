@@ -1389,3 +1389,146 @@ def promotion_node(
         ),
         "cart_changed": True,
     }
+# ============================================================
+# CALCULATE CART
+# ============================================================
+
+
+def calculate_cart_node(
+    state: CommerceState,
+) -> dict:
+    """
+    Retrieve current Shopify cart totals.
+
+    Shopify remains the source of truth.
+    """
+
+    logger.info(
+        "Executing calculate cart node."
+    )
+
+    cart_id = state.get(
+        "cart_id"
+    )
+
+    if not cart_id:
+        return {
+            "response": (
+                "No active shopping cart was found."
+            ),
+            "cart_changed": False,
+        }
+
+    result = get_cart.invoke(
+        {
+            "cart_id": cart_id,
+        }
+    )
+
+    if not result.get(
+        "success"
+    ):
+        return {
+            "response": result.get(
+                "message",
+                "Unable to calculate the cart total.",
+            ),
+            "cart_changed": False,
+        }
+
+    cart = (
+        result.get(
+            "cart"
+        )
+        or {}
+    )
+
+    cost = (
+        cart.get(
+            "cost"
+        )
+        or {}
+    )
+
+    subtotal = (
+        cost.get(
+            "subtotalAmount"
+        )
+        or {}
+    )
+
+    total = (
+        cost.get(
+            "totalAmount"
+        )
+        or {}
+    )
+
+    subtotal_amount = (
+        subtotal.get(
+            "amount"
+        )
+    )
+
+    subtotal_currency = (
+        subtotal.get(
+            "currencyCode"
+        )
+    )
+
+    total_amount = (
+        total.get(
+            "amount"
+        )
+    )
+
+    total_currency = (
+        total.get(
+            "currencyCode"
+        )
+    )
+
+    if (
+        not subtotal_amount
+        and not total_amount
+    ):
+        return {
+            "response": (
+                "The cart was retrieved, but Shopify "
+                "did not return calculated totals."
+            ),
+            "cart_changed": False,
+        }
+
+    output = []
+
+    if (
+        subtotal_amount
+        and subtotal_currency
+    ):
+        output.append(
+            (
+                "Your cart subtotal is "
+                f"{subtotal_amount} "
+                f"{subtotal_currency}."
+            )
+        )
+
+    if (
+        total_amount
+        and total_currency
+    ):
+        output.append(
+            (
+                "Your cart total is "
+                f"{total_amount} "
+                f"{total_currency}."
+            )
+        )
+
+    return {
+        "response": " ".join(
+            output
+        ),
+        "cart_changed": False,
+    }

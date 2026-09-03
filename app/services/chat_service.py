@@ -1,15 +1,20 @@
+# app/services/chat_service.py
+
 import logging
 from typing import Any
 
 from fastapi.concurrency import run_in_threadpool
 
-from app.graph.commerce_graph import commerce_graph
+from app.graph.commerce_graph import (
+    commerce_graph,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 class ChatService:
+
     # ============================================================
     # PROCESS MESSAGE
     # ============================================================
@@ -20,33 +25,62 @@ class ChatService:
         cart_id: str | None = None,
     ) -> dict[str, Any]:
         """
-        Process the user request through LangGraph.
+        Process a customer request through the LangGraph commerce
+        orchestration layer.
 
-        ChatService no longer performs agent routing directly.
-        Product, knowledge and cart routing is handled by
-        commerce_graph.
+        The CommerceGraph is responsible for:
+
+        - multi-intent planning
+        - product-domain execution
+        - knowledge/RAG execution
+        - cart workflow execution
+        - response aggregation
         """
 
         logger.info(
-            "Processing chat message=%r cart_id_present=%s",
+            (
+                "Processing chat message=%r "
+                "cart_id_present=%s"
+            ),
             message,
             bool(cart_id),
         )
 
-        if not message or not message.strip():
+        # ========================================================
+        # INPUT VALIDATION
+        # ========================================================
+
+        if (
+            not message
+            or not message.strip()
+        ):
             raise ValueError(
                 "Chat message cannot be empty."
             )
 
-        # --------------------------------------------------------
+        normalized_message = (
+            message.strip()
+        )
+
+        # ========================================================
         # INITIAL LANGGRAPH STATE
-        # --------------------------------------------------------
+        # ========================================================
 
         initial_state = {
-            "user_message": message.strip(),
+            "user_message": (
+                normalized_message
+            ),
             "cart_id": cart_id,
+
+            # Domain state
             "intent": "unknown",
             "cart_action": "unknown",
+
+            # Multi-intent orchestration state
+            "tasks": [],
+            "task_results": [],
+
+            # Mutation/error state
             "cart_changed": False,
             "error": None,
         }
@@ -55,55 +89,73 @@ class ChatService:
             "Invoking CommerceGraph."
         )
 
+        # ========================================================
+        # EXECUTE LANGGRAPH
+        # ========================================================
+
         try:
+
             result = await run_in_threadpool(
                 commerce_graph.invoke,
                 initial_state,
             )
 
-        except Exception:
+        except Exception as exc:
+
             logger.exception(
                 "CommerceGraph execution failed."
             )
 
             raise RuntimeError(
                 "Unable to process the commerce request."
-            )
+            ) from exc
 
         logger.info(
             "CommerceGraph execution completed."
         )
 
-        # --------------------------------------------------------
-        # EXTRACT GRAPH RESPONSE
-        # --------------------------------------------------------
+        # ========================================================
+        # VALIDATE GRAPH RESULT
+        # ========================================================
 
         if not result:
+
             raise RuntimeError(
                 "CommerceGraph returned no result."
             )
 
-        response_content = result.get(
-            "response"
+        response_content = (
+            result.get(
+                "response"
+            )
         )
 
-        error = result.get(
-            "error"
+        error = (
+            result.get(
+                "error"
+            )
         )
 
-        cart_changed = result.get(
-            "cart_changed",
-            False,
+        cart_changed = bool(
+            result.get(
+                "cart_changed",
+                False,
+            )
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # HANDLE GRAPH ERROR
-        # --------------------------------------------------------
+        # ========================================================
 
         if not response_content:
+
             if error:
+
                 logger.warning(
-                    "CommerceGraph returned error: %s",
+                    (
+                        "CommerceGraph returned "
+                        "error: %s"
+                    ),
                     error,
                 )
 
@@ -115,9 +167,9 @@ class ChatService:
                 "CommerceGraph returned an empty response."
             )
 
-        # --------------------------------------------------------
+        # ========================================================
         # NORMALIZE RESPONSE
-        # --------------------------------------------------------
+        # ========================================================
 
         response_content = (
             ChatService._normalize_response(
@@ -126,33 +178,54 @@ class ChatService:
         )
 
         if not response_content:
+
             raise RuntimeError(
                 "CommerceGraph returned an empty response."
             )
 
+        # ========================================================
+        # OBSERVABILITY
+        # ========================================================
+
+        task_results = result.get(
+            "task_results",
+            [],
+        )
+
         logger.info(
             (
                 "CommerceGraph response completed. "
-                "intent=%s cart_action=%s "
-                "cart_changed=%s"
+                "intent=%s "
+                "cart_action=%s "
+                "cart_changed=%s "
+                "task_count=%s"
             ),
-            result.get("intent"),
-            result.get("cart_action"),
+            result.get(
+                "intent"
+            ),
+            result.get(
+                "cart_action"
+            ),
             cart_changed,
+            len(task_results),
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # RETURN API RESPONSE
-        # --------------------------------------------------------
+        # ========================================================
 
         return {
             "success": True,
-            "response": response_content,
+            "response": (
+                response_content
+            ),
             "cart_id": result.get(
                 "cart_id",
                 cart_id,
             ),
-            "cart_changed": cart_changed,
+            "cart_changed": (
+                cart_changed
+            ),
         }
 
     # ============================================================
@@ -164,57 +237,89 @@ class ChatService:
         response: Any,
     ) -> str:
         """
-        Normalize graph response into a plain string.
+        Normalize LangGraph/LLM output into a plain string.
 
-        Most LangGraph nodes should already return strings,
-        but this keeps ChatService defensive against structured
-        LLM responses returned by Product or Knowledge nodes.
+        Most commerce graph nodes already return strings, but this
+        method keeps the API layer defensive against providers that
+        return structured message content blocks.
         """
 
-        # Standard string
+        # --------------------------------------------------------
+        # STANDARD STRING
+        # --------------------------------------------------------
+
         if isinstance(
             response,
             str,
         ):
-            return response.strip()
+            return (
+                response.strip()
+            )
 
-        # Structured content-block list
+        # --------------------------------------------------------
+        # STRUCTURED CONTENT-BLOCK LIST
+        # --------------------------------------------------------
+
         if isinstance(
             response,
             list,
         ):
-            text_parts = []
+
+            text_parts: list[str] = []
 
             for block in response:
+
                 if isinstance(
                     block,
                     str,
                 ):
+
                     text_parts.append(
                         block
                     )
 
-                elif isinstance(
+                    continue
+
+                if isinstance(
                     block,
                     dict,
                 ):
-                    block_text = block.get(
-                        "text"
+
+                    block_text = (
+                        block.get(
+                            "text"
+                        )
                     )
 
                     if block_text:
+
                         text_parts.append(
-                            str(block_text)
+                            str(
+                                block_text
+                            )
                         )
 
-            return "\n".join(
-                text_parts
-            ).strip()
+            return (
+                "\n".join(
+                    text_parts
+                )
+                .strip()
+            )
 
-        # Defensive fallback
+        # --------------------------------------------------------
+        # NONE
+        # --------------------------------------------------------
+
         if response is None:
             return ""
 
-        return str(
-            response
-        ).strip()
+        # --------------------------------------------------------
+        # DEFENSIVE FALLBACK
+        # --------------------------------------------------------
+
+        return (
+            str(
+                response
+            )
+            .strip()
+        )

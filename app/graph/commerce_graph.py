@@ -1,56 +1,104 @@
 # app/graph/commerce_graph.py
 
 import logging
+from typing import Any
 
-from langgraph.graph import (
-    START,
-    END,
-    StateGraph,
-)
-
-from app.graph.state import CommerceState
-from app.graph.router import route_intent
-from app.graph.cart_router import route_cart_action
-
-from app.graph.product_node import (
-    product_node,
-)
-
-from app.graph.knowledge_node import (
-    knowledge_node,
-)
+from langgraph.graph import END, START, StateGraph
 
 from app.graph.cart_nodes import (
-    view_cart_node,
-
-    extract_add_request,
-    resolve_variant_node,
     add_cart_node,
-
-    extract_update_request,
-    update_cart_node,
-
-    extract_remove_request,
-    resolve_remove_line_node,
-    remove_cart_node,
-
+    calculate_cart_node,
+    extract_add_request,
     extract_promotion_request,
+    extract_remove_request,
+    extract_update_request,
     promotion_node,
+    remove_cart_node,
+    resolve_remove_line_node,
+    resolve_variant_node,
+    update_cart_node,
+    view_cart_node,
 )
+
+from app.graph.conditional_nodes import (
+    conditional_add_cart_node,
+    conditional_inventory_check_node,
+    conditional_inventory_unavailable_node,
+    extract_conditional_inventory_request,
+    resolve_conditional_variant_node,
+    route_after_inventory_check,
+)
+
+from app.graph.cart_router import route_cart_action
+from app.graph.knowledge_node import knowledge_node
+from app.graph.planner import plan_tasks_node
+from app.graph.product_node import product_node
+from app.graph.router import route_intent
+from app.graph.state import CommerceState
 
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# DOMAIN ENTRY
+# ============================================================
+
+
+def domain_entry_node(
+    state: CommerceState,
+) -> dict[str, Any]:
+    """
+    Determine the domain for a single planned task.
+
+    If the multi-intent planner has already supplied a valid
+    domain, preserve it.
+
+    Otherwise fall back to the existing deterministic router.
+
+    This allows:
+    - planner-driven multi-intent execution
+    - backward-compatible single-domain routing
+    """
+
+    planned_intent = state.get(
+        "intent",
+        "unknown",
+    )
+
+    if planned_intent in {
+        "product",
+        "knowledge",
+        "cart",
+        "conditional",
+    }:
+        logger.info(
+            "Using planner-selected domain intent: %s",
+            planned_intent,
+        )
+
+        return {
+            "intent": planned_intent
+        }
+
+    logger.info(
+        "No valid planned intent supplied. "
+        "Falling back to deterministic router."
+    )
+
+    return route_intent(state)
+
+
+# ============================================================
 # ROUTING HELPERS
 # ============================================================
+
 
 def choose_intent(
     state: CommerceState,
 ) -> str:
     """
-    Return the top-level intent decided by route_intent().
+    Return the top-level domain selected for the current task.
     """
 
     intent = state.get(
@@ -70,7 +118,8 @@ def choose_cart_action(
     state: CommerceState,
 ) -> str:
     """
-    Return the cart action decided by route_cart_action().
+    Return the cart action selected by the deterministic
+    cart router.
     """
 
     cart_action = state.get(
@@ -90,12 +139,13 @@ def choose_cart_action(
 # FALLBACK NODES
 # ============================================================
 
+
 def unknown_intent_node(
     state: CommerceState,
-) -> dict:
+) -> dict[str, Any]:
     """
-    Fallback when the top-level router cannot determine
-    which domain should handle the request.
+    Fallback when the target commerce domain cannot be
+    determined.
     """
 
     logger.warning(
@@ -113,10 +163,10 @@ def unknown_intent_node(
 
 def unknown_cart_action_node(
     state: CommerceState,
-) -> dict:
+) -> dict[str, Any]:
     """
-    Fallback when the request is recognized as cart-related
-    but the exact cart action cannot be determined.
+    Fallback when a request is cart-related but the exact cart
+    operation cannot be determined.
     """
 
     logger.warning(
@@ -136,12 +186,10 @@ def unknown_cart_action_node(
 # ERROR ROUTING HELPERS
 # ============================================================
 
+
 def route_after_add_extraction(
     state: CommerceState,
 ) -> str:
-    """
-    Stop the add workflow if extraction failed.
-    """
 
     if state.get("error"):
         return "error"
@@ -152,9 +200,6 @@ def route_after_add_extraction(
 def route_after_variant_resolution(
     state: CommerceState,
 ) -> str:
-    """
-    Stop the add workflow if variant resolution failed.
-    """
 
     if state.get("error"):
         return "error"
@@ -165,9 +210,6 @@ def route_after_variant_resolution(
 def route_after_update_extraction(
     state: CommerceState,
 ) -> str:
-    """
-    Stop the update workflow if extraction failed.
-    """
 
     if state.get("error"):
         return "error"
@@ -178,9 +220,6 @@ def route_after_update_extraction(
 def route_after_remove_extraction(
     state: CommerceState,
 ) -> str:
-    """
-    Stop remove workflow if extraction failed.
-    """
 
     if state.get("error"):
         return "error"
@@ -191,13 +230,6 @@ def route_after_remove_extraction(
 def route_after_remove_resolution(
     state: CommerceState,
 ) -> str:
-    """
-    Stop remove workflow if cart-line resolution failed.
-
-    Note:
-    Some resolution failures may already populate response
-    instead of error, so check both.
-    """
 
     if state.get("error"):
         return "error"
@@ -211,9 +243,6 @@ def route_after_remove_resolution(
 def route_after_promotion_extraction(
     state: CommerceState,
 ) -> str:
-    """
-    Stop promotion workflow if promotion-code extraction failed.
-    """
 
     if state.get("error"):
         return "error"
@@ -223,9 +252,10 @@ def route_after_promotion_extraction(
 
 def graph_error_node(
     state: CommerceState,
-) -> dict:
+) -> dict[str, Any]:
     """
-    Convert internal graph errors into the final response.
+    Convert internal workflow errors into a customer-facing
+    graph response.
     """
 
     error = state.get(
@@ -247,155 +277,187 @@ def graph_error_node(
 
 
 # ============================================================
-# BUILD GRAPH
+# BUILD SINGLE-DOMAIN GRAPH
 # ============================================================
 
-builder = StateGraph(
+domain_builder = StateGraph(
     CommerceState
 )
 
 
-# ------------------------------------------------------------
-# TOP-LEVEL NODES
-# ------------------------------------------------------------
+# ============================================================
+# DOMAIN NODES
+# ============================================================
 
-builder.add_node(
-    "router",
-    route_intent,
+domain_builder.add_node(
+    "domain_entry",
+    domain_entry_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "product",
     product_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "knowledge",
     knowledge_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "cart_router",
     route_cart_action,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "unknown_intent",
     unknown_intent_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "unknown_cart_action",
     unknown_cart_action_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "graph_error",
     graph_error_node,
 )
 
+domain_builder.add_node(
+    "cart_calculate",
+    calculate_cart_node,
+)
 
-# ------------------------------------------------------------
-# VIEW CART
-# ------------------------------------------------------------
 
-builder.add_node(
+domain_builder.add_node(
+    "conditional_extract",
+    extract_conditional_inventory_request,
+)
+
+domain_builder.add_node(
+    "conditional_resolve",
+    resolve_conditional_variant_node,
+)
+
+domain_builder.add_node(
+    "conditional_inventory_check",
+    conditional_inventory_check_node,
+)
+
+domain_builder.add_node(
+    "conditional_add",
+    conditional_add_cart_node,
+)
+
+domain_builder.add_node(
+    "conditional_unavailable",
+    conditional_inventory_unavailable_node,
+)
+
+
+# ============================================================
+# CART VIEW
+# ============================================================
+
+domain_builder.add_node(
     "cart_view",
     view_cart_node,
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # ADD TO CART
-# ------------------------------------------------------------
+# ============================================================
 
-builder.add_node(
+domain_builder.add_node(
     "extract_add",
     extract_add_request,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "resolve_variant",
     resolve_variant_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "cart_add",
     add_cart_node,
 )
 
 
-# ------------------------------------------------------------
-# UPDATE QUANTITY
-# ------------------------------------------------------------
+# ============================================================
+# UPDATE CART
+# ============================================================
 
-builder.add_node(
+domain_builder.add_node(
     "extract_update",
     extract_update_request,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "cart_update",
     update_cart_node,
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # REMOVE FROM CART
-# ------------------------------------------------------------
+# ============================================================
 
-builder.add_node(
+domain_builder.add_node(
     "extract_remove",
     extract_remove_request,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "resolve_remove_line",
     resolve_remove_line_node,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "cart_remove",
     remove_cart_node,
 )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # PROMOTION
-# ------------------------------------------------------------
+# ============================================================
 
-builder.add_node(
+domain_builder.add_node(
     "extract_promotion",
     extract_promotion_request,
 )
 
-builder.add_node(
+domain_builder.add_node(
     "cart_promotion",
     promotion_node,
 )
 
 
 # ============================================================
-# GRAPH ENTRY
+# DOMAIN GRAPH ENTRY
 # ============================================================
 
-builder.add_edge(
+domain_builder.add_edge(
     START,
-    "router",
+    "domain_entry",
 )
 
 
 # ============================================================
-# TOP-LEVEL ROUTING
+# DOMAIN ROUTING
 # ============================================================
 
-builder.add_conditional_edges(
-    "router",
+domain_builder.add_conditional_edges(
+    "domain_entry",
     choose_intent,
     {
         "product": "product",
         "knowledge": "knowledge",
         "cart": "cart_router",
+        "conditional": "conditional_extract",
         "unknown": "unknown_intent",
     },
 )
@@ -405,7 +467,7 @@ builder.add_conditional_edges(
 # CART ACTION ROUTING
 # ============================================================
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "cart_router",
     choose_cart_action,
     {
@@ -414,16 +476,17 @@ builder.add_conditional_edges(
         "update": "extract_update",
         "remove": "extract_remove",
         "promotion": "extract_promotion",
+        "calculate": "cart_calculate",
         "unknown": "unknown_cart_action",
     },
 )
 
 
 # ============================================================
-# ADD TO CART WORKFLOW
+# ADD WORKFLOW
 # ============================================================
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "extract_add",
     route_after_add_extraction,
     {
@@ -432,7 +495,7 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "resolve_variant",
     route_after_variant_resolution,
     {
@@ -443,10 +506,10 @@ builder.add_conditional_edges(
 
 
 # ============================================================
-# UPDATE QUANTITY WORKFLOW
+# UPDATE WORKFLOW
 # ============================================================
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "extract_update",
     route_after_update_extraction,
     {
@@ -457,10 +520,10 @@ builder.add_conditional_edges(
 
 
 # ============================================================
-# REMOVE FROM CART WORKFLOW
+# REMOVE WORKFLOW
 # ============================================================
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "extract_remove",
     route_after_remove_extraction,
     {
@@ -469,7 +532,7 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "resolve_remove_line",
     route_after_remove_resolution,
     {
@@ -484,7 +547,7 @@ builder.add_conditional_edges(
 # PROMOTION WORKFLOW
 # ============================================================
 
-builder.add_conditional_edges(
+domain_builder.add_conditional_edges(
     "extract_promotion",
     route_after_promotion_extraction,
     {
@@ -495,62 +558,551 @@ builder.add_conditional_edges(
 
 
 # ============================================================
-# TERMINAL EDGES
+# CONDITIONAL INVENTORY -> ADD WORKFLOW
 # ============================================================
 
-builder.add_edge(
+domain_builder.add_conditional_edges(
+    "conditional_extract",
+    lambda state: (
+        "error"
+        if state.get("error")
+        else "continue"
+    ),
+    {
+        "continue": "conditional_resolve",
+        "error": "graph_error",
+    },
+)
+
+domain_builder.add_conditional_edges(
+    "conditional_resolve",
+    lambda state: (
+        "error"
+        if state.get("error")
+        else "continue"
+    ),
+    {
+        "continue": "conditional_inventory_check",
+        "error": "graph_error",
+    },
+)
+
+domain_builder.add_conditional_edges(
+    "conditional_inventory_check",
+    route_after_inventory_check,
+    {
+        "available": "conditional_add",
+        "unavailable": "conditional_unavailable",
+        "error": "graph_error",
+    },
+)
+
+
+# ============================================================
+# DOMAIN TERMINAL EDGES
+# ============================================================
+
+domain_builder.add_edge(
     "product",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "knowledge",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "cart_view",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "cart_add",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "cart_update",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "cart_remove",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "cart_promotion",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
+    "cart_calculate",
+    END,
+)
+
+domain_builder.add_edge(
+    "conditional_add",
+    END,
+)
+
+domain_builder.add_edge(
+    "conditional_unavailable",
+    END,
+)
+
+domain_builder.add_edge(
     "unknown_intent",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "unknown_cart_action",
     END,
 )
 
-builder.add_edge(
+domain_builder.add_edge(
     "graph_error",
     END,
 )
 
 
 # ============================================================
-# COMPILE GRAPH
+# COMPILE SINGLE-DOMAIN GRAPH
 # ============================================================
 
-commerce_graph = builder.compile()
+domain_graph = (
+    domain_builder.compile()
+)
+
+
+# ============================================================
+# MULTI-INTENT TASK EXECUTOR
+# ============================================================
+
+
+def execute_planned_tasks_node(
+    state: CommerceState,
+) -> dict[str, Any]:
+    """
+    Execute all tasks produced by the commerce planner.
+
+    Each task receives an isolated state so that data from one
+    domain does not leak into another domain.
+
+    Example:
+
+    Product + Cart:
+
+        task 1 -> Product domain
+        task 2 -> Cart domain
+
+    Cart + Knowledge:
+
+        task 1 -> Cart domain
+        task 2 -> Knowledge domain
+
+    Responses are combined after every requested task has been
+    processed.
+    """
+
+    tasks = state.get(
+        "tasks",
+        [],
+    )
+
+    if not tasks:
+
+        logger.warning(
+            "Commerce planner returned no tasks."
+        )
+
+        return {
+            "response": (
+                "I could not determine what commerce "
+                "operation to perform."
+            ),
+            "cart_changed": False,
+            "task_results": [],
+            "error": (
+                "Commerce planner returned no tasks."
+            ),
+        }
+
+    logger.info(
+        "Executing %s planned commerce task(s).",
+        len(tasks),
+    )
+
+    responses: list[str] = []
+
+    task_results: list[
+        dict[str, Any]
+    ] = []
+
+    overall_cart_changed = False
+
+    current_cart_id = state.get(
+        "cart_id"
+    )
+
+    last_intent = "unknown"
+
+    last_cart_action = "unknown"
+
+    # ========================================================
+    # EXECUTE TASKS IN USER REQUEST ORDER
+    # ========================================================
+
+    for index, task in enumerate(
+        tasks,
+        start=1,
+    ):
+
+        task_query = (
+            task.get(
+                "query",
+                "",
+            )
+            .strip()
+        )
+
+        planned_intent = task.get(
+            "intent",
+            "auto",
+        )
+
+        if not task_query:
+
+            logger.warning(
+                "Skipping empty planner task at index %s.",
+                index,
+            )
+
+            continue
+
+        logger.info(
+            (
+                "Executing planned task %s/%s. "
+                "planned_intent=%s query=%r"
+            ),
+            index,
+            len(tasks),
+            planned_intent,
+            task_query,
+        )
+
+        # ====================================================
+        # CREATE ISOLATED TASK STATE
+        # ====================================================
+
+        task_intent = (
+            planned_intent
+            if planned_intent
+            in {
+                "product",
+                "knowledge",
+                "cart",
+                "conditional",
+            }
+            else "unknown"
+        )
+
+        task_state: CommerceState = {
+            "user_message": task_query,
+            "cart_id": current_cart_id,
+            "intent": task_intent,
+            "cart_action": "unknown",
+            "cart_changed": False,
+            "error": None,
+        }
+
+        # ====================================================
+        # EXECUTE DOMAIN GRAPH
+        # ====================================================
+
+        try:
+
+            task_result = (
+                domain_graph.invoke(
+                    task_state
+                )
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                (
+                    "Planned task execution failed. "
+                    "task=%s query=%r"
+                ),
+                index,
+                task_query,
+            )
+
+            task_response = (
+                "Unable to complete this request: "
+                f"{task_query}"
+            )
+
+            responses.append(
+                task_response
+            )
+
+            task_results.append(
+                {
+                    "intent": planned_intent,
+                    "query": task_query,
+                    "response": task_response,
+                    "cart_changed": False,
+                    "error": str(exc),
+                }
+            )
+
+            # Tasks in the current implementation are
+            # independent, so continue with the remaining tasks.
+            continue
+
+        # ====================================================
+        # PROPAGATE CART ID
+        # ====================================================
+
+        result_cart_id = task_result.get(
+            "cart_id"
+        )
+
+        if result_cart_id:
+
+            current_cart_id = (
+                result_cart_id
+            )
+
+        # ====================================================
+        # TRACK CART MUTATION
+        # ====================================================
+
+        task_cart_changed = bool(
+            task_result.get(
+                "cart_changed",
+                False,
+            )
+        )
+
+        overall_cart_changed = (
+            overall_cart_changed
+            or task_cart_changed
+        )
+
+        # ====================================================
+        # TASK RESPONSE
+        # ====================================================
+
+        task_response = (
+            task_result.get(
+                "response"
+            )
+            or task_result.get(
+                "error"
+            )
+        )
+
+        if task_response:
+
+            normalized_task_response = (
+                str(
+                    task_response
+                )
+                .strip()
+            )
+
+            if normalized_task_response:
+
+                responses.append(
+                    normalized_task_response
+                )
+
+        else:
+
+            normalized_task_response = ""
+
+        executed_intent = (
+            task_result.get(
+                "intent",
+                planned_intent,
+            )
+        )
+
+        executed_cart_action = (
+            task_result.get(
+                "cart_action",
+                "unknown",
+            )
+        )
+
+        # ====================================================
+        # RECORD TASK RESULT
+        # ====================================================
+
+        task_results.append(
+            {
+                "intent": executed_intent,
+                "query": task_query,
+                "response": (
+                    normalized_task_response
+                ),
+                "cart_changed": (
+                    task_cart_changed
+                ),
+                "error": task_result.get(
+                    "error"
+                ),
+            }
+        )
+
+        last_intent = (
+            executed_intent
+        )
+
+        last_cart_action = (
+            executed_cart_action
+        )
+
+        logger.info(
+            (
+                "Completed planned task %s/%s. "
+                "executed_intent=%s "
+                "cart_action=%s "
+                "cart_changed=%s"
+            ),
+            index,
+            len(tasks),
+            executed_intent,
+            executed_cart_action,
+            task_cart_changed,
+        )
+
+    # ========================================================
+    # RESPONSE VALIDATION
+    # ========================================================
+
+    if not responses:
+
+        logger.warning(
+            "No planned task produced a response."
+        )
+
+        return {
+            "response": (
+                "I was unable to complete the requested tasks."
+            ),
+            "cart_changed": overall_cart_changed,
+            "task_results": task_results,
+            "cart_id": current_cart_id,
+            "error": (
+                "No task produced a response."
+            ),
+        }
+
+    # ========================================================
+    # RESPONSE AGGREGATION
+    # ========================================================
+
+    final_response = (
+        "\n\n".join(
+            responses
+        )
+    )
+
+    # Preserve normal single-domain intent for simple queries.
+    #
+    # Mixed requests are clearly identified as multi.
+    if len(tasks) == 1:
+
+        final_intent = (
+            last_intent
+        )
+
+        final_cart_action = (
+            last_cart_action
+        )
+
+    else:
+
+        final_intent = "multi"
+
+        final_cart_action = "unknown"
+
+    logger.info(
+        (
+            "Planned task execution completed. "
+            "task_count=%s final_intent=%s "
+            "cart_changed=%s"
+        ),
+        len(tasks),
+        final_intent,
+        overall_cart_changed,
+    )
+
+    return {
+        "response": final_response,
+        "intent": final_intent,
+        "cart_action": final_cart_action,
+        "cart_changed": overall_cart_changed,
+        "cart_id": current_cart_id,
+        "task_results": task_results,
+        "error": None,
+    }
+
+
+# ============================================================
+# OUTER MULTI-INTENT ORCHESTRATION GRAPH
+# ============================================================
+
+orchestration_builder = StateGraph(
+    CommerceState
+)
+
+
+# ============================================================
+# ORCHESTRATION NODES
+# ============================================================
+
+orchestration_builder.add_node(
+    "planner",
+    plan_tasks_node,
+)
+
+orchestration_builder.add_node(
+    "task_executor",
+    execute_planned_tasks_node,
+)
+
+
+# ============================================================
+# ORCHESTRATION EDGES
+# ============================================================
+
+orchestration_builder.add_edge(
+    START,
+    "planner",
+)
+
+orchestration_builder.add_edge(
+    "planner",
+    "task_executor",
+)
+
+orchestration_builder.add_edge(
+    "task_executor",
+    END,
+)
+
+
+# ============================================================
+# PUBLIC COMMERCE GRAPH
+# ============================================================
+
+commerce_graph = (
+    orchestration_builder.compile()
+)
