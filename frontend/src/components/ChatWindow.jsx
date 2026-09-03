@@ -1,14 +1,28 @@
-import { useState } from "react";
+// frontend/src/components/ChatWindow.jsx
+
+import {
+  useState,
+} from "react";
 
 import {
   sendChatMessage,
 } from "../api/chatApi";
 
+import {
+  clearCommerceSessionId,
+  getCommerceSessionId,
+  hasCommerceSession,
+  saveCommerceSessionId,
+} from "../utils/sessionStorage";
+
 
 function ChatWindow({
-  cartId,
   onCartChanged,
 }) {
+  // ============================================================
+  // COMPONENT STATE
+  // ============================================================
+
   const [messages, setMessages] =
     useState([]);
 
@@ -18,116 +32,299 @@ function ChatWindow({
   const [loading, setLoading] =
     useState(false);
 
+  const [error, setError] =
+    useState("");
+
+  const [
+    sessionActive,
+    setSessionActive,
+  ] = useState(
+    () => hasCommerceSession()
+  );
+
 
   // ============================================================
-  // SEND CHAT MESSAGE
+  // ADD MESSAGE TO UI
   // ============================================================
 
-  const sendMessage = async () => {
-    const message =
-      input.trim();
-
-    if (!message || loading) {
-      return;
-    }
-
-    // Add user message immediately.
-    setMessages((previous) => [
-      ...previous,
-      {
-        role: "user",
-        content: message,
-      },
-    ]);
-
-    setInput("");
-    setLoading(true);
-
-    try {
-      // ---------------------------------------------------------
-      // Send request to FastAPI /api/chat
-      // ---------------------------------------------------------
-
-      const result =
-        await sendChatMessage(
-          message,
-          cartId
-        );
-
-
-      // ---------------------------------------------------------
-      // Add AI response to chat
-      // ---------------------------------------------------------
-
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: result.response,
-        },
-      ]);
-
-
-      // ---------------------------------------------------------
-      // Refresh cart after successful chat request.
-      //
-      // The Cart Agent may have changed Shopify cart state through:
-      //
-      // - add_to_cart
-      // - update_quantity
-      // - remove_from_cart
-      // - apply_promotion
-      //
-      // React does not automatically know that Shopify changed,
-      // so retrieve the latest cart and update CommercePage state.
-      // ---------------------------------------------------------
-
-      if (
-        result.cart_changed &&
-        onCartChanged
-      ) {
-        try {
-          await onCartChanged();
-        } catch (cartRefreshError) {
-          console.error(
-            "Unable to refresh cart after chat operation:",
-            cartRefreshError
-          );
-        }
-      }
-
-    } catch (error) {
-      console.error(
-        "Chat error:",
-        error
-      );
-
-
-      // ---------------------------------------------------------
-      // Display API error when available
-      // ---------------------------------------------------------
-
-      const errorMessage =
-        error.response?.data?.detail ||
-        "Unable to process the request.";
-
-
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: errorMessage,
-        },
-      ]);
-
-    } finally {
-      setLoading(false);
-    }
+  const appendMessage = (
+    message
+  ) => {
+    setMessages(
+      (currentMessages) => [
+        ...currentMessages,
+        message,
+      ]
+    );
   };
 
 
   // ============================================================
-  // ENTER KEY HANDLER
+  // CHECK FOR INVALID / EXPIRED SESSION
+  // ============================================================
+
+  const isInvalidSessionError = (
+    requestError
+  ) => {
+    const status =
+      requestError?.response?.status;
+
+    const detail =
+      String(
+        requestError?.response
+          ?.data?.detail || ""
+      ).toLowerCase();
+
+    if (status !== 400) {
+      return false;
+    }
+
+    return (
+      detail.includes(
+        "session does not exist"
+      ) ||
+      detail.includes(
+        "session is not active"
+      ) ||
+      detail.includes(
+        "session has expired"
+      )
+    );
+  };
+
+
+  // ============================================================
+  // EXECUTE CHAT REQUEST
+  // ============================================================
+
+  const executeChatRequest = async (
+    userMessage,
+    sessionId
+  ) => {
+    return sendChatMessage(
+      userMessage,
+      sessionId
+    );
+  };
+
+
+  // ============================================================
+  // SEND MESSAGE
+  // ============================================================
+
+  const handleSendMessage =
+    async () => {
+      const userMessage =
+        input.trim();
+
+      if (!userMessage) {
+        return;
+      }
+
+      if (loading) {
+        return;
+      }
+
+      // --------------------------------------------------------
+      // DISPLAY USER MESSAGE
+      // --------------------------------------------------------
+
+      appendMessage({
+        role: "user",
+        content: userMessage,
+      });
+
+      setInput("");
+
+      setError("");
+
+      setLoading(true);
+
+      try {
+        // ------------------------------------------------------
+        // GET CURRENT APPLICATION SESSION
+        // ------------------------------------------------------
+
+        let sessionId =
+          getCommerceSessionId();
+
+        let result;
+
+        try {
+          // ----------------------------------------------------
+          // NORMAL REQUEST
+          // ----------------------------------------------------
+
+          result =
+            await executeChatRequest(
+              userMessage,
+              sessionId
+            );
+
+        } catch (requestError) {
+          // ----------------------------------------------------
+          // STALE / INVALID SESSION RECOVERY
+          // ----------------------------------------------------
+          //
+          // If the stored session no longer exists,
+          // clear the stale browser session and retry once.
+          //
+          // Session lookup fails before graph execution, so this
+          // recovery does not re-execute a successfully completed
+          // commerce mutation.
+          //
+
+          if (
+            sessionId &&
+            isInvalidSessionError(
+              requestError
+            )
+          ) {
+            console.warn(
+              "Stored commerce session is invalid. " +
+              "Starting a new session."
+            );
+
+            clearCommerceSessionId();
+
+            setSessionActive(
+              false
+            );
+
+            sessionId = null;
+
+            result =
+              await executeChatRequest(
+                userMessage,
+                null
+              );
+
+          } else {
+            throw requestError;
+          }
+        }
+
+
+        // ------------------------------------------------------
+        // SAVE SESSION RETURNED BY BACKEND
+        // ------------------------------------------------------
+
+        if (result.session_id) {
+          saveCommerceSessionId(
+            result.session_id
+          );
+
+          setSessionActive(
+            true
+          );
+        }
+
+
+        // ------------------------------------------------------
+        // DISPLAY ASSISTANT MESSAGE
+        // ------------------------------------------------------
+
+        appendMessage({
+          role: "assistant",
+
+          content:
+            result.response ||
+            "No response was returned.",
+        });
+
+
+        // ------------------------------------------------------
+        // REFRESH CART AFTER CHAT MUTATION
+        // ------------------------------------------------------
+        //
+        // Step 19 backend lifecycle may create/update the Shopify
+        // cart without exposing the cart ID to this component.
+        //
+
+        if (
+          result.cart_changed &&
+          typeof onCartChanged ===
+            "function"
+        ) {
+          try {
+            await onCartChanged();
+          } catch (
+            cartRefreshError
+          ) {
+            console.error(
+              "Unable to refresh cart:",
+              cartRefreshError
+            );
+          }
+        }
+
+      } catch (requestError) {
+        console.error(
+          "Chat request failed:",
+          requestError
+        );
+
+        const errorMessage =
+          requestError?.response
+            ?.data?.detail ||
+          requestError?.message ||
+          "Unable to process your request.";
+
+        setError(
+          errorMessage
+        );
+
+        appendMessage({
+          role: "assistant",
+
+          content:
+            `Sorry, I could not process that request. ` +
+            `${errorMessage}`,
+
+          error: true,
+        });
+
+      } finally {
+        setLoading(
+          false
+        );
+      }
+    };
+
+
+  // ============================================================
+  // NEW CONVERSATION
+  // ============================================================
+
+  const handleNewConversation =
+    () => {
+      if (loading) {
+        return;
+      }
+
+      // Remove only the public session ID.
+      //
+      // We deliberately do NOT know or clear:
+      // - LangGraph thread_id
+      // - Shopify cart_id
+      //
+      // Backend session retention can be handled independently.
+      clearCommerceSessionId();
+
+      setSessionActive(
+        false
+      );
+
+      setMessages([]);
+
+      setInput("");
+
+      setError("");
+    };
+
+
+  // ============================================================
+  // KEYBOARD HANDLER
   // ============================================================
 
   const handleKeyDown = (
@@ -139,79 +336,193 @@ function ChatWindow({
     ) {
       event.preventDefault();
 
-      sendMessage();
+      handleSendMessage();
     }
   };
 
 
   // ============================================================
-  // UI
+  // RENDER
   // ============================================================
 
   return (
-    <div className="chat-panel">
+    <div className="chat-window">
 
-      <h2>
-        AI Commerce Assistant
-      </h2>
+      {/* ======================================================
+          HEADER
+          ====================================================== */}
 
+      <div className="chat-header">
+
+        <div>
+          <h2>
+            AI Commerce Assistant
+          </h2>
+
+          <div className="chat-session-status">
+            {sessionActive
+              ? "Conversation active"
+              : "New conversation"}
+          </div>
+        </div>
+
+
+        <button
+          type="button"
+          className="new-chat-button"
+          onClick={
+            handleNewConversation
+          }
+          disabled={
+            loading
+          }
+        >
+          New conversation
+        </button>
+
+      </div>
+
+
+      {/* ======================================================
+          MESSAGE AREA
+          ====================================================== */}
 
       <div className="chat-messages">
 
         {messages.length === 0 && (
-          <div className="chat-welcome">
-            Ask me about products,
-            benefits, promotions or your
-            shopping cart.
+          <div className="chat-empty-state">
+
+            <div>
+              Ask me about:
+            </div>
+
+            <div>
+              Products, inventory,
+              product benefits,
+              policies, promotions,
+              and your shopping cart.
+            </div>
+
           </div>
         )}
 
 
         {messages.map(
-          (message, index) => (
-            <div
-              key={index}
-              className={
-                message.role === "user"
-                  ? "message user-message"
-                  : "message assistant-message"
-              }
-            >
-              {message.content}
-            </div>
-          )
+          (
+            message,
+            index
+          ) => {
+            const isUser =
+              message.role ===
+              "user";
+
+            return (
+              <div
+                key={
+                  `${message.role}-${index}`
+                }
+                className={
+                  [
+                    "chat-message",
+
+                    isUser
+                      ? "user"
+                      : "assistant",
+
+                    message.error
+                      ? "error"
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
+                }
+              >
+
+                <div className="chat-message-role">
+                  {isUser
+                    ? "You"
+                    : "Assistant"}
+                </div>
+
+
+                <div className="chat-message-content">
+                  {message.content}
+                </div>
+
+              </div>
+            );
+          }
         )}
 
 
+        {/* ====================================================
+            LOADING INDICATOR
+            ==================================================== */}
+
         {loading && (
-          <div className="message assistant-message">
-            Thinking...
+          <div
+            className={
+              "chat-message assistant"
+            }
+          >
+            <div className="chat-message-role">
+              Assistant
+            </div>
+
+            <div className="chat-message-content">
+              Thinking...
+            </div>
           </div>
         )}
 
       </div>
 
 
-      <div className="chat-input">
+      {/* ======================================================
+          ERROR
+          ====================================================== */}
+
+      {error && (
+        <div
+          className="chat-error"
+          role="alert"
+        >
+          {error}
+        </div>
+      )}
+
+
+      {/* ======================================================
+          INPUT
+          ====================================================== */}
+
+      <div className="chat-input-container">
 
         <textarea
           value={input}
-          placeholder="Ask the AI commerce assistant..."
-          onChange={(event) =>
-            setInput(
-              event.target.value
-            )
+          placeholder={
+            "Ask about products, inventory, policies, or your cart..."
+          }
+          onChange={
+            (event) =>
+              setInput(
+                event.target.value
+              )
           }
           onKeyDown={
             handleKeyDown
           }
-          disabled={loading}
+          disabled={
+            loading
+          }
+          rows={3}
         />
 
 
         <button
+          type="button"
           onClick={
-            sendMessage
+            handleSendMessage
           }
           disabled={
             loading ||
@@ -219,7 +530,7 @@ function ChatWindow({
           }
         >
           {loading
-            ? "Processing..."
+            ? "Sending..."
             : "Send"}
         </button>
 
@@ -228,5 +539,6 @@ function ChatWindow({
     </div>
   );
 }
+
 
 export default ChatWindow;

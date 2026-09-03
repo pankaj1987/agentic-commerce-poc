@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.cart_nodes import (
@@ -35,6 +36,7 @@ from app.graph.planner import plan_tasks_node
 from app.graph.product_node import product_node
 from app.graph.router import route_intent
 from app.graph.state import CommerceState
+from app.persistence.checkpointer import get_checkpointer
 
 
 logger = logging.getLogger(__name__)
@@ -718,11 +720,18 @@ def execute_planned_tasks_node(
             "Commerce planner returned no tasks."
         )
 
+        response = (
+            "I could not determine what commerce "
+            "operation to perform."
+        )
+
         return {
-            "response": (
-                "I could not determine what commerce "
-                "operation to perform."
-            ),
+            "response": response,
+            "messages": [
+                AIMessage(
+                    content=response
+                )
+            ],
             "cart_changed": False,
             "task_results": [],
             "error": (
@@ -992,10 +1001,17 @@ def execute_planned_tasks_node(
             "No planned task produced a response."
         )
 
+        response = (
+            "I was unable to complete the requested tasks."
+        )
+
         return {
-            "response": (
-                "I was unable to complete the requested tasks."
-            ),
+            "response": response,
+            "messages": [
+                AIMessage(
+                    content=response
+                )
+            ],
             "cart_changed": overall_cart_changed,
             "task_results": task_results,
             "cart_id": current_cart_id,
@@ -1046,6 +1062,16 @@ def execute_planned_tasks_node(
 
     return {
         "response": final_response,
+
+        # Persist the assistant turn in the same LangGraph thread.
+        # Because CommerceState.messages uses add_messages, this
+        # AIMessage is appended to the conversation checkpoint.
+        "messages": [
+            AIMessage(
+                content=final_response
+            )
+        ],
+
         "intent": final_intent,
         "cart_action": final_cart_action,
         "cart_changed": overall_cart_changed,

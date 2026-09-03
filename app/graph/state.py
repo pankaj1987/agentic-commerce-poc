@@ -1,20 +1,12 @@
 # app/graph/state.py
 
-from typing import (
-    Annotated,
-    Literal,
-    TypedDict,
-)
+from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
 class CommerceTask(TypedDict):
-    """
-    One independently executable task produced by the planner.
-    """
-
     intent: Literal[
         "product",
         "knowledge",
@@ -22,15 +14,10 @@ class CommerceTask(TypedDict):
         "conditional",
         "auto",
     ]
-
     query: str
 
 
 class CommerceTaskResult(TypedDict, total=False):
-    """
-    Result of executing one planned task.
-    """
-
     intent: str
     query: str
     response: str
@@ -39,19 +26,30 @@ class CommerceTaskResult(TypedDict, total=False):
 
 
 class CommerceState(TypedDict, total=False):
-
+    # ------------------------------------------------------------
+    # CONVERSATION MEMORY
+    # ------------------------------------------------------------
+    #
+    # add_messages is a LangGraph reducer. When the same thread_id
+    # is invoked again, newly supplied HumanMessage/AIMessage
+    # objects are merged with the messages already stored by the
+    # checkpointer rather than replacing them.
+    #
     messages: Annotated[
         list[BaseMessage],
         add_messages,
     ]
 
+    # Current user request. This remains separate from messages
+    # because workflow nodes should operate on the current turn,
+    # while messages provides conversation context.
     user_message: str
 
-    cart_id: str | None
+    # ------------------------------------------------------------
+    # COMMERCE STATE
+    # ------------------------------------------------------------
 
-    # ========================================================
-    # ORCHESTRATION
-    # ========================================================
+    cart_id: str | None
 
     intent: Literal[
         "product",
@@ -63,14 +61,7 @@ class CommerceState(TypedDict, total=False):
     ]
 
     tasks: list[CommerceTask]
-
-    task_results: list[
-        CommerceTaskResult
-    ]
-
-    # ========================================================
-    # CART
-    # ========================================================
+    task_results: list[CommerceTaskResult]
 
     cart_action: Literal[
         "view",
@@ -82,6 +73,10 @@ class CommerceState(TypedDict, total=False):
         "unknown",
     ]
 
+    # ------------------------------------------------------------
+    # PRODUCT / CART WORKFLOW FIELDS
+    # ------------------------------------------------------------
+
     product_name: str | None
     variant_title: str | None
     quantity: int | None
@@ -90,27 +85,21 @@ class CommerceState(TypedDict, total=False):
     line_number: int | None
 
     promotion_code: str | None
-
     resolved_variant_id: str | None
 
-    # ========================================================
-    # CONDITIONAL INVENTORY WORKFLOW
-    # ========================================================
+    # ------------------------------------------------------------
+    # CONDITIONAL INVENTORY -> ADD WORKFLOW
+    # ------------------------------------------------------------
 
     inventory_checked: bool
-
     inventory_tracked: bool | None
-
     inventory_available: bool | None
-
     available_quantity: int | None
 
-    # ========================================================
-    # RESULT
-    # ========================================================
+    # ------------------------------------------------------------
+    # RESPONSE / EXECUTION STATUS
+    # ------------------------------------------------------------
 
     response: str
-
     cart_changed: bool
-
     error: str | None

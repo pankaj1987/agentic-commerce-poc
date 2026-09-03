@@ -3,25 +3,17 @@
 import logging
 from typing import Literal
 
-from pydantic import (
-    BaseModel,
-    Field,
-)
+from pydantic import BaseModel, Field
 
 from app.config.llm import get_llm
 from app.graph.state import CommerceState
+from app.utils.message_utils import extract_message_text
 
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# STRUCTURED PLANNER OUTPUT
-# ============================================================
-
-
 class PlannedTask(BaseModel):
-
     intent: Literal[
         "product",
         "knowledge",
@@ -29,41 +21,150 @@ class PlannedTask(BaseModel):
         "conditional",
     ] = Field(
         description=(
-            "Commerce domain or controlled workflow "
-            "responsible for this task."
+            "Commerce domain that should execute this task."
         )
     )
 
     query: str = Field(
         min_length=1,
         description=(
-            "Self-contained request that should be "
-            "executed by the selected domain/workflow."
+            "Self-contained task query containing all information "
+            "needed by the selected domain."
         ),
     )
 
 
 class CommercePlan(BaseModel):
-
     tasks: list[PlannedTask] = Field(
         min_length=1,
         description=(
-            "All requested commerce tasks in execution order."
+            "Tasks to execute sequentially in the same logical "
+            "order as the customer's request."
         ),
     )
 
 
-# ============================================================
-# PLANNER
-# ============================================================
+def _message_role(message) -> str:
+    """
+    Convert LangChain message types to customer-friendly role names.
+    """
+
+    message_type = getattr(
+        message,
+        "type",
+        "message",
+    )
+
+    mapping = {
+        "human": "Customer",
+        "ai": "Assistant",
+        "system": "System",
+        "tool": "Tool",
+    }
+
+    return mapping.get(
+        message_type,
+        str(message_type).title(),
+    )
+
+
+def _format_recent_history(
+    state: CommerceState,
+    max_messages: int = 8,
+) -> str:
+    """
+    Return recent PREVIOUS conversation turns for reference
+    resolution.
+
+    The current HumanMessage is already inserted into state before
+    the planner runs. It is intentionally excluded from the history
+    section when it matches state['user_message'] so that the current
+    request is not duplicated in the planner prompt.
+    """
+
+    messages = list(
+        state.get(
+            "messages",
+            [],
+        )
+        or []
+    )
+
+    if not messages:
+        return "(No previous conversation.)"
+
+    current_user_message = (
+        state.get(
+            "user_message",
+            "",
+        )
+        .strip()
+    )
+
+    # Exclude the current HumanMessage from "previous history".
+    if messages:
+        last_message = messages[-1]
+
+        last_type = getattr(
+            last_message,
+            "type",
+            None,
+        )
+
+        last_text = extract_message_text(
+            last_message
+        ).strip()
+
+        if (
+            last_type == "human"
+            and current_user_message
+            and last_text == current_user_message
+        ):
+            messages = messages[:-1]
+
+    messages = messages[
+        -max_messages:
+    ]
+
+    if not messages:
+        return "(No previous conversation.)"
+
+    history_lines: list[str] = []
+
+    for message in messages:
+        text = extract_message_text(
+            message
+        ).strip()
+
+        if not text:
+            continue
+
+        history_lines.append(
+            f"{_message_role(message)}: {text}"
+        )
+
+    if not history_lines:
+        return "(No previous conversation.)"
+
+    return "\n".join(
+        history_lines
+    )
 
 
 def plan_tasks_node(
     state: CommerceState,
 ) -> dict:
+    """
+    Convert the current customer request into one or more
+    sequential commerce tasks.
+
+    Conversation history is used only to resolve references
+    contained in the CURRENT request. Previous actions must never
+    be repeated merely because they appear in history.
+    """
 
     logger.info(
-        "Executing multi-intent commerce planner."
+        "Executing commerce planner."
     )
 
     user_message = (
@@ -76,11 +177,17 @@ def plan_tasks_node(
 
     if not user_message:
         return {
+            "tasks": [],
             "error": (
                 "No user message was provided."
             ),
-            "tasks": [],
         }
+
+    recent_history = (
+        _format_recent_history(
+            state
+        )
+    )
 
     llm = get_llm()
 
@@ -91,199 +198,198 @@ def plan_tasks_node(
     )
 
     prompt = f"""
-You are the planning layer of an e-commerce AI system.
+You are the planning layer for an agentic commerce system.
 
-Decompose the customer's request into one or more executable
-commerce tasks.
+Your job is to convert the CURRENT customer request into one or more
+self-contained tasks.
 
-Available task types:
+The available domains are:
 
 1. product
+   Use for live product/catalog/inventory questions.
 
-Use for:
-- product search
-- product details
-- inventory questions
-- stock availability
-- variant availability
-- prices
+   Examples:
+   - search for products
+   - product details
+   - current price
+   - current inventory
+   - whether a product or variant is in stock
 
 2. knowledge
+   Use for static commerce knowledge stored in the knowledge base.
 
-Use for STATIC knowledge:
-- return policy
-- refund policy
-- shipping policy
-- delivery policy
-- promotion rules
-- product benefits
-- order split explanations
+   Examples:
+   - return policy
+   - shipping policy
+   - delivery policy
+   - promotion rules
+   - product benefits
+   - order split policy
 
 3. cart
+   Use for shopping-cart operations.
 
-Use for:
-- show cart
-- add to cart
-- remove from cart
-- update quantity
-- cart subtotal
-- cart total
-- amount to pay
-- apply promotion code
+   Examples:
+   - show/view cart
+   - add item
+   - remove item
+   - change quantity
+   - apply promotion
+   - cart subtotal
+   - cart total
 
 4. conditional
+   Use ONLY for a supported dependent commerce workflow where a
+   cart mutation depends on a live inventory result.
 
-Use when a later commerce operation MUST happen only if
-a previous condition is true.
+   Currently supported conditional workflow:
 
-Currently supported conditional workflow:
+       CHECK INVENTORY
+              ->
+       IF enough inventory exists
+              ->
+       ADD requested quantity to cart
 
-INVENTORY -> ADD TO CART
+   Example:
+   "Check whether Athletic Running Shoes US 8 / Black is in stock.
+    If it is in stock, add 2 to my cart."
 
-Examples:
+   This MUST be emitted as ONE conditional task.
 
-"Check whether US 8 / Black is in stock.
-If it is in stock, add 2 to my cart."
+============================================================
+CONVERSATION HISTORY RULES
+============================================================
 
-"If Athletic Running Shoes US 8 / Black is available,
-add 2 to my cart."
+Recent conversation may be used ONLY to resolve references in the
+CURRENT customer request.
 
-"Add 2 Athletic Running Shoes US 8 / Black only if
-they are in stock."
+Examples of references that may require history:
+- "add another one"
+- "add 2 of those"
+- "make that 3"
+- "is the black one available?"
+- "what is its return policy?"
+- "add the one you just showed me"
 
-These MUST be ONE conditional task.
+When history clearly identifies the referenced product, variant,
+quantity, or subject, rewrite the planned task so it is self-contained.
 
-Do NOT split them into independent product and cart tasks,
-because the cart mutation depends on inventory.
+Example:
 
-IMPORTANT RULES:
+Previous conversation:
+Customer: Is Athletic Running Shoes US 8 / Black in stock?
+Assistant: Yes, it is available.
 
-- Extract every independently requested task.
-- Preserve execution order.
-- Each query must be self-contained.
-- Do not answer the customer.
-- Do not execute tools.
-- Do not invent requests.
-- Do not split one logical conditional workflow.
-- When "if", "only if", "provided that", or equivalent wording
-  makes a mutation dependent on inventory, use conditional.
+Current request:
+"Add 2 of those."
 
-Examples:
+Good planned task:
+intent = cart
+query = "Add 2 Athletic Running Shoes US 8 / Black to my cart."
 
+CRITICAL:
+- Do NOT repeat a previous action merely because it appears in history.
+- Do NOT re-run an earlier add/remove/update/promotion operation unless
+  the CURRENT customer request asks for it.
+- History is context, not a task list.
+- Current Shopify APIs remain the source of truth for live commerce data.
+- Do not infer missing product details when history does not clearly
+  identify them.
 
-Customer:
-"What is the return policy?"
+============================================================
+MULTI-INTENT RULES
+============================================================
 
-Tasks:
-[
-  {{
-    "intent": "knowledge",
-    "query": "What is the return policy?"
-  }}
-]
+If the customer asks for multiple INDEPENDENT things, create multiple
+tasks in the same order as the customer's request.
 
+Example:
 
-Customer:
-"Is Athletic Running Shoes in stock?"
+"Is Athletic Running Shoes in stock and add Athletic Running Shoes
+ US 8 / Black to my cart."
 
-Tasks:
-[
-  {{
-    "intent": "product",
-    "query": "Is Athletic Running Shoes in stock?"
-  }}
-]
+This has no dependency phrase such as "if it is in stock".
 
+Plan:
+1. product task for inventory
+2. cart task for add
 
-Customer:
-"Add Athletic Running Shoes US 8 / Black to my cart."
+Example:
 
-Tasks:
-[
-  {{
-    "intent": "cart",
-    "query":
-      "Add Athletic Running Shoes US 8 / Black to my cart."
-  }}
-]
+"Add Athletic Running Shoes US 8 / Black and tell me the return policy."
 
+Plan:
+1. cart task
+2. knowledge task
 
-Customer:
-"Is Athletic Running Shoes in stock and add
-Athletic Running Shoes US 8 / Black to my cart."
+============================================================
+CONDITIONAL RULES
+============================================================
 
-There is no conditional wording, so these are independent:
+If words such as:
+- if
+- only if
+- provided that
+- when it is available
 
-[
-  {{
-    "intent": "product",
-    "query": "Is Athletic Running Shoes in stock?"
-  }},
-  {{
-    "intent": "cart",
-    "query":
-      "Add Athletic Running Shoes US 8 / Black to my cart."
-  }}
-]
+make the ADD operation depend on the inventory result, create exactly
+ONE conditional task.
 
+Do NOT split a dependent inventory -> add request into separate product
+and cart tasks.
 
-Customer:
-"Check whether Athletic Running Shoes US 8 / Black
-is in stock. If it is in stock, add 2 to my cart."
+============================================================
+SELF-CONTAINED TASK RULES
+============================================================
 
-Tasks:
-[
-  {{
-    "intent": "conditional",
-    "query":
-      "Check whether Athletic Running Shoes US 8 / Black "
-      "is in stock. If it is in stock, add 2 to my cart."
-  }}
-]
+Every task query must contain enough information for the selected
+domain to execute it.
 
+Resolve references from conversation history only when the reference is
+clear.
 
-Customer:
-"Add 2 Athletic Running Shoes US 8 / Black to my cart.
-What is the return policy?"
+Do not invent:
+- product names
+- variants
+- quantities
+- promotion codes
+- policies
+- cart contents
+- inventory
 
-Tasks:
-[
-  {{
-    "intent": "cart",
-    "query":
-      "Add 2 Athletic Running Shoes US 8 / Black to my cart."
-  }},
-  {{
-    "intent": "knowledge",
-    "query": "What is the return policy?"
-  }}
-]
+============================================================
+RECENT PREVIOUS CONVERSATION
+============================================================
 
+{recent_history}
 
-Customer request:
+============================================================
+CURRENT CUSTOMER REQUEST
+============================================================
 
 {user_message}
 """
 
     try:
-
         plan = structured_llm.invoke(
             prompt
         )
 
     except Exception:
-
         logger.exception(
-            "Multi-intent planner failed."
+            "Commerce planner failed."
         )
 
+        # The outer graph can still fall back to its deterministic
+        # routing when the planner cannot produce structured output.
         return {
             "tasks": [
                 {
                     "intent": "auto",
                     "query": user_message,
                 }
-            ]
+            ],
+            "error": None,
         }
 
     tasks = [
@@ -296,24 +402,26 @@ Customer request:
     ]
 
     if not tasks:
+        logger.warning(
+            "Commerce planner produced an empty task list."
+        )
+
         return {
             "tasks": [
                 {
                     "intent": "auto",
                     "query": user_message,
                 }
-            ]
+            ],
+            "error": None,
         }
 
     logger.info(
-        "Planner created %s task(s): %s",
+        "Commerce planner produced %s task(s).",
         len(tasks),
-        [
-            task["intent"]
-            for task in tasks
-        ],
     )
 
     return {
-        "tasks": tasks
+        "tasks": tasks,
+        "error": None,
     }

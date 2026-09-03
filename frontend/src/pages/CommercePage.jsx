@@ -20,6 +20,23 @@ import {
 
 
 function CommercePage() {
+  // ============================================================
+  // CART STATE
+  // ============================================================
+  //
+  // IMPORTANT:
+  //
+  // cartId is currently kept ONLY in React memory because the
+  // existing direct Cart REST APIs still use Shopify cart_id.
+  //
+  // It must NOT be stored in localStorage.
+  //
+  // The chat flow does not receive this cartId.
+  //
+  // Once cartApi is migrated to session_id, this cartId state
+  // can be removed completely.
+  // ============================================================
+
   const [cartId, setCartId] =
     useState(null);
 
@@ -32,232 +49,193 @@ function CommercePage() {
   const [cartMessage, setCartMessage] =
     useState("");
 
-  // Prevent duplicate cart initialization in React StrictMode.
+  // Prevent duplicate cart initialization caused by
+  // React StrictMode during development.
   const cartInitializationStarted =
     useRef(false);
 
 
   // ============================================================
-  // INITIALIZE CART SESSION
+  // INITIALIZE UI CART
+  // ============================================================
   //
-  // On page load:
-  // 1. Prevent duplicate execution in React StrictMode
-  // 2. Check localStorage for an existing Shopify cart ID
-  // 3. If found, try to restore that cart
-  // 4. If not found or invalid, create a new cart
+  // OLD DESIGN:
+  //
+  // localStorage
+  //     ↓
+  // shopify_cart_id
+  //     ↓
+  // restore Shopify cart
+  //
+  //
+  // CURRENT TRANSITIONAL DESIGN:
+  //
+  // Page load
+  //     ↓
+  // create temporary UI cart
+  //     ↓
+  // cartId exists only in React memory
+  //
+  //
+  // Chat session/cart ownership is handled independently by
+  // backend CommerceSession + LangGraph.
   // ============================================================
 
   useEffect(() => {
-    if (cartInitializationStarted.current) {
+    if (
+      cartInitializationStarted.current
+    ) {
       return;
     }
 
-    cartInitializationStarted.current = true;
+    cartInitializationStarted.current =
+      true;
 
-    initializeCartSession();
+    initializeCart();
   }, []);
 
 
-  const initializeCartSession = async () => {
-    const existingCartId =
-      localStorage.getItem(
-        "shopify_cart_id"
-      );
-
-    if (existingCartId) {
-      console.log(
-        "Existing Shopify cart ID found in localStorage."
-      );
-
-      await loadExistingCart(
-        existingCartId
-      );
-    } else {
-      console.log(
-        "No existing cart found. Creating a new Shopify cart."
-      );
-
-      await initializeCart();
-    }
-  };
-
-
   // ============================================================
-  // LOAD EXISTING CART
+  // CREATE NEW UI CART
   // ============================================================
 
-  const loadExistingCart = async (
-    existingCartId
-  ) => {
-    setCartLoading(true);
-    setCartMessage("");
-
-    try {
-      const result =
-        await getCart(
-          existingCartId
-        );
-
-      if (
-        result.success &&
-        result.cart
-      ) {
-        setCartId(
-          existingCartId
-        );
-
-        setCart(
-          result.cart
-        );
-
-        console.log(
-          "Existing Shopify cart restored successfully."
-        );
-
-        return;
-      }
-
-      console.warn(
-        "Stored Shopify cart is no longer valid."
-      );
-
-      localStorage.removeItem(
-        "shopify_cart_id"
-      );
-
-      await initializeCart();
-
-    } catch (error) {
-      console.error(
-        "Unable to restore existing cart:",
-        error
-      );
-
-      localStorage.removeItem(
-        "shopify_cart_id"
-      );
-
-      await initializeCart();
-
-    } finally {
-      setCartLoading(false);
-    }
-  };
-
-
-  // ============================================================
-  // CREATE NEW CART
-  // ============================================================
-
-  const initializeCart = async () => {
-    setCartLoading(true);
-    setCartMessage("");
-
-    try {
-      const result =
-        await createCart();
-
-      if (
-        result.success &&
-        result.cart
-      ) {
-        setCart(
-          result.cart
-        );
-
-        setCartId(
-          result.cart.id
-        );
-
-        localStorage.setItem(
-          "shopify_cart_id",
-          result.cart.id
-        );
-
-        console.log(
-          "New Shopify cart created and saved to localStorage."
-        );
-      } else {
-        setCartMessage(
-          result.message ||
-          "Unable to create shopping cart."
-        );
-      }
-
-    } catch (error) {
-      console.error(
-        "Unable to create cart:",
-        error
+  const initializeCart =
+    async () => {
+      setCartLoading(
+        true
       );
 
       setCartMessage(
-        error.response?.data?.detail ||
-        "Unable to create shopping cart."
+        ""
       );
 
-    } finally {
-      setCartLoading(false);
-    }
-  };
+      try {
+        const result =
+          await createCart();
+
+        if (
+          result.success &&
+          result.cart
+        ) {
+          setCart(
+            result.cart
+          );
+
+          setCartId(
+            result.cart.id
+          );
+
+          // ====================================================
+          // IMPORTANT
+          // ====================================================
+          //
+          // DO NOT persist:
+          //
+          // localStorage.setItem(
+          //   "shopify_cart_id",
+          //   result.cart.id
+          // );
+          //
+          // Shopify cart IDs must not be persisted in browser
+          // storage in the Phase 3 architecture.
+          // ====================================================
+
+          console.log(
+            "UI cart created successfully."
+          );
+
+        } else {
+          setCartMessage(
+            result.message ||
+              "Unable to create shopping cart."
+          );
+        }
+
+      } catch (error) {
+        console.error(
+          "Unable to create cart:",
+          error
+        );
+
+        setCartMessage(
+          error.response?.data?.detail ||
+            "Unable to create shopping cart."
+        );
+
+      } finally {
+        setCartLoading(
+          false
+        );
+      }
+    };
 
 
   // ============================================================
   // ADD TO CART
   // ============================================================
 
-  const handleAddToCart = async (
-    variantId,
-    quantity
-  ) => {
-    if (!cartId) {
-      setCartMessage(
-        "Shopping cart is not ready yet."
-      );
-
-      return;
-    }
-
-    setCartLoading(true);
-    setCartMessage("");
-
-    try {
-      const result =
-        await addCartItem(
-          cartId,
-          variantId,
-          quantity
-        );
-
-      if (result.success) {
-        setCart(
-          result.cart
-        );
-
+  const handleAddToCart =
+    async (
+      variantId,
+      quantity
+    ) => {
+      if (!cartId) {
         setCartMessage(
-          "Product added to cart."
+          "Shopping cart is not ready yet."
         );
-      } else {
-        setCartMessage(
-          result.message ||
-          "Unable to add product to cart."
-        );
+
+        return;
       }
 
-    } catch (error) {
-      console.error(
-        "Add to cart failed:",
-        error
+      setCartLoading(
+        true
       );
 
       setCartMessage(
-        error.response?.data?.detail ||
-        "Unable to add product to cart."
+        ""
       );
 
-    } finally {
-      setCartLoading(false);
-    }
-  };
+      try {
+        const result =
+          await addCartItem(
+            cartId,
+            variantId,
+            quantity
+          );
+
+        if (result.success) {
+          setCart(
+            result.cart
+          );
+
+          setCartMessage(
+            "Product added to cart."
+          );
+
+        } else {
+          setCartMessage(
+            result.message ||
+              "Unable to add product to cart."
+          );
+        }
+
+      } catch (error) {
+        console.error(
+          "Add to cart failed:",
+          error
+        );
+
+        setCartMessage(
+          error.response?.data?.detail ||
+            "Unable to add product to cart."
+        );
+
+      } finally {
+        setCartLoading(
+          false
+        );
+      }
+    };
 
 
   // ============================================================
@@ -273,8 +251,13 @@ function CommercePage() {
         return;
       }
 
-      setCartLoading(true);
-      setCartMessage("");
+      setCartLoading(
+        true
+      );
+
+      setCartMessage(
+        ""
+      );
 
       try {
         const result =
@@ -292,10 +275,11 @@ function CommercePage() {
           setCartMessage(
             "Cart updated."
           );
+
         } else {
           setCartMessage(
             result.message ||
-            "Unable to update cart."
+              "Unable to update cart."
           );
         }
 
@@ -307,11 +291,13 @@ function CommercePage() {
 
         setCartMessage(
           error.response?.data?.detail ||
-          "Unable to update cart quantity."
+            "Unable to update cart quantity."
         );
 
       } finally {
-        setCartLoading(false);
+        setCartLoading(
+          false
+        );
       }
     };
 
@@ -321,13 +307,20 @@ function CommercePage() {
   // ============================================================
 
   const handleRemove =
-    async (lineId) => {
+    async (
+      lineId
+    ) => {
       if (!cartId) {
         return;
       }
 
-      setCartLoading(true);
-      setCartMessage("");
+      setCartLoading(
+        true
+      );
+
+      setCartMessage(
+        ""
+      );
 
       try {
         const result =
@@ -344,10 +337,11 @@ function CommercePage() {
           setCartMessage(
             "Product removed from cart."
           );
+
         } else {
           setCartMessage(
             result.message ||
-            "Unable to remove product from cart."
+              "Unable to remove product from cart."
           );
         }
 
@@ -359,11 +353,13 @@ function CommercePage() {
 
         setCartMessage(
           error.response?.data?.detail ||
-          "Unable to remove product from cart."
+            "Unable to remove product from cart."
         );
 
       } finally {
-        setCartLoading(false);
+        setCartLoading(
+          false
+        );
       }
     };
 
@@ -373,13 +369,20 @@ function CommercePage() {
   // ============================================================
 
   const handleApplyPromotion =
-    async (discountCode) => {
+    async (
+      discountCode
+    ) => {
       if (!cartId) {
         return;
       }
 
-      setCartLoading(true);
-      setCartMessage("");
+      setCartLoading(
+        true
+      );
+
+      setCartMessage(
+        ""
+      );
 
       try {
         const result =
@@ -396,11 +399,11 @@ function CommercePage() {
 
         setCartMessage(
           result.message ||
-          (
-            result.success
-              ? "Promotion applied."
-              : "Promotion could not be applied."
-          )
+            (
+              result.success
+                ? "Promotion applied."
+                : "Promotion could not be applied."
+            )
         );
 
       } catch (error) {
@@ -411,40 +414,57 @@ function CommercePage() {
 
         setCartMessage(
           error.response?.data?.detail ||
-          "Unable to apply promotion."
+            "Unable to apply promotion."
         );
 
       } finally {
-        setCartLoading(false);
+        setCartLoading(
+          false
+        );
       }
     };
 
 
   // ============================================================
-    //Refresh cart data from the server to ensure the UI is up-to-date.
+  // REFRESH CART
+  // ============================================================
+  //
+  // This currently refreshes the in-memory UI cart.
+  //
+  // Once cart REST endpoints are migrated to session_id,
+  // refreshCart should resolve the backend cart using session_id
+  // instead of passing Shopify cartId.
   // ============================================================
 
-  const refreshCart = async () => {
-  if (!cartId) {
-    return;
-  }
+  const refreshCart =
+    async () => {
+      if (!cartId) {
+        return;
+      }
 
-  try {
-    const result = await getCart(cartId);
+      try {
+        const result =
+          await getCart(
+            cartId
+          );
 
-    if (
-      result.success &&
-      result.cart
-    ) {
-      setCart(result.cart);
-    }
-  } catch (error) {
-    console.error(
-      "Unable to refresh cart:",
-      error
-    );
-  }
-};
+        if (
+          result.success &&
+          result.cart
+        ) {
+          setCart(
+            result.cart
+          );
+        }
+
+      } catch (error) {
+        console.error(
+          "Unable to refresh cart:",
+          error
+        );
+      }
+    };
+
 
   // ============================================================
   // UI
@@ -452,6 +472,10 @@ function CommercePage() {
 
   return (
     <div>
+
+      {/* ======================================================
+          HEADER
+          ====================================================== */}
 
       <header className="app-header">
 
@@ -465,6 +489,7 @@ function CommercePage() {
           </p>
         </div>
 
+
         <div className="cart-summary">
           Cart:{" "}
           {cart?.totalQuantity || 0} items
@@ -473,12 +498,20 @@ function CommercePage() {
       </header>
 
 
+      {/* ======================================================
+          STATUS MESSAGE
+          ====================================================== */}
+
       {cartMessage && (
         <div className="status-message">
           {cartMessage}
         </div>
       )}
 
+
+      {/* ======================================================
+          CART LOADING
+          ====================================================== */}
 
       {cartLoading && (
         <div className="loading-message">
@@ -487,7 +520,15 @@ function CommercePage() {
       )}
 
 
+      {/* ======================================================
+          MAIN COMMERCE LAYOUT
+          ====================================================== */}
+
       <main className="commerce-layout">
+
+        {/* ====================================================
+            PRODUCT CATALOG
+            ==================================================== */}
 
         <section className="catalog-section">
 
@@ -500,16 +541,23 @@ function CommercePage() {
         </section>
 
 
+        {/* ====================================================
+            CART
+            ==================================================== */}
+
         <aside className="cart-section">
 
           <Cart
             cart={cart}
+
             onUpdateQuantity={
               handleUpdateQuantity
             }
+
             onRemove={
               handleRemove
             }
+
             onApplyPromotion={
               handleApplyPromotion
             }
@@ -518,11 +566,16 @@ function CommercePage() {
         </aside>
 
 
+        {/* ====================================================
+            CHAT
+            ==================================================== */}
+
         <section className="chat-section">
 
           <ChatWindow
-            cartId={cartId}
-            onCartChanged={refreshCart}
+            onCartChanged={
+              refreshCart
+            }
           />
 
         </section>
@@ -532,5 +585,6 @@ function CommercePage() {
     </div>
   );
 }
+
 
 export default CommercePage;
