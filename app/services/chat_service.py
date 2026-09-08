@@ -1,16 +1,31 @@
+# app/services/chat_service.py
+
 import logging
-import re
 from typing import Any
 
-from fastapi.concurrency import run_in_threadpool
+from fastapi.concurrency import (
+    run_in_threadpool,
+)
+from langchain_core.messages import (
+    HumanMessage,
+)
 
-from app.agents.cart_agent import cart_agent
-from app.agents.product_agent import product_agent
+from app.graph.commerce_graph import (
+    commerce_graph,
+)
+from app.persistence.repositories.session_repository import (
+    SessionRepository,
+)
+from app.services.session_service import (
+    SessionService,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 class ChatService:
+
     # ============================================================
     # PROCESS MESSAGE
     # ============================================================
@@ -18,194 +33,413 @@ class ChatService:
     @staticmethod
     async def process_message(
         message: str,
-        cart_id: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
-        logger.info(
-            "Processing chat message=%r cart_id_present=%s",
-            message,
-            bool(cart_id),
+        """
+        Process one customer conversation turn.
+
+        Public client state:
+            session_id
+
+        Server-side state:
+            thread_id
+            cart_id
+
+        Lifecycle:
+
+        1. Resolve/create CommerceSession.
+        2. Obtain thread_id from CommerceSession.
+        3. Obtain Shopify cart_id from CommerceSession.
+        4. Add current HumanMessage.
+        5. Invoke LangGraph using thread_id.
+        6. LangGraph loads previous conversation checkpoint.
+        7. Execute commerce workflow.
+        8. Persist changed cart_id if graph created/replaced cart.
+        9. Return session_id only.
+
+        cart_id and thread_id never leave the backend.
+        """
+
+        normalized_message = (
+            message.strip()
+            if message
+            else ""
         )
 
-        # --------------------------------------------------------
-        # Determine which agent should handle the request
-        # --------------------------------------------------------
-        is_cart_request = ChatService._is_cart_request(message)
-
-        if is_cart_request:
-            logger.info("Routing request to Cart Agent.")
-            agent_message = message
-
-            if cart_id:
-                agent_message = (
-                    f"{message}\n\n"
-                    "CURRENT SHOPIFY CART CONTEXT:\n"
-                    f"cart_id={cart_id}\n\n"
-                    "Use this cart ID for all cart operations. "
-                    "Do not ask the customer for another cart ID."
-                )
-
-                logger.info(
-                    "Invoking Cart Agent with cart context present=%s",
-                    bool(cart_id),
-                )
-
-            result = await run_in_threadpool(
-                cart_agent.invoke,
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": agent_message,
-                        }
-                    ]
-                },
-            )
-        else:
-            logger.info("Routing request to Product Agent.")
-            result = await run_in_threadpool(
-                product_agent.invoke,
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": message,
-                        }
-                    ]
-                },
+        if not normalized_message:
+            raise ValueError(
+                "Chat message cannot be empty."
             )
 
-        logger.info("Agent execution completed.")
+        # ========================================================
+        # STEP 1
+        # RESOLVE OR CREATE COMMERCE SESSION
+        # ========================================================
 
-        # --------------------------------------------------------
-        # Extract final agent message
-        # --------------------------------------------------------
-        messages = result.get("messages", [])
-        if not messages:
-            raise RuntimeError("Agent returned no messages.")
+        try:
+            commerce_session = (
+                await run_in_threadpool(
+                    SessionService.get_or_create_session,
+                    session_id,
+                    user_id,
+                )
+            )
 
-        final_message = messages[-1]
+        except (
+            ValueError,
+            PermissionError,
+        ):
+            raise
 
-        # --------------------------------------------------------
-        # Normalize formats into a plain string.
-        # --------------------------------------------------------
-        response_content = ChatService._extract_message_text(final_message)
+        except Exception:
+            logger.exception(
+                "Unable to resolve commerce session."
+            )
 
-        logger.info("Final message type: %s", type(final_message).__name__)
-        logger.info("Final message content: %r", final_message.content)
+            raise RuntimeError(
+                "Unable to initialize the commerce session."
+            )
+
         logger.info(
-            "Final message additional_kwargs: %r",
-            getattr(final_message, "additional_kwargs", None),
+            (
+                "Processing commerce conversation. "
+                "session_present=%s "
+                "thread_present=%s "
+                "cart_present=%s"
+            ),
+            bool(
+                commerce_session.session_id
+            ),
+            bool(
+                commerce_session.thread_id
+            ),
+            bool(
+                commerce_session.cart_id
+            ),
         )
+
+        # ========================================================
+        # STEP 2
+        # CREATE CURRENT LANGGRAPH INPUT
+        # ========================================================
+        #
+        # Do NOT manually load previous messages here.
+        #
+        # PostgresSaver will load the existing state using
+        # thread_id.
+        #
+        # add_messages then merges this HumanMessage with the
+        # persisted messages channel.
+        #
+
+        initial_state = {
+            "user_message": (
+                normalized_message
+            ),
+
+            "messages": [
+                HumanMessage(
+                    content=normalized_message
+                )
+            ],
+
+            # Shopify cart is server-owned.
+            #
+            # It may legitimately be None for a new session.
+            "cart_id": (
+                commerce_session.cart_id
+            ),
+
+            # Reset transient per-turn state.
+            "intent": "unknown",
+            "cart_action": "unknown",
+
+            "tasks": [],
+            "task_results": [],
+
+            "cart_changed": False,
+
+            "error": None,
+        }
+
+        # ========================================================
+        # STEP 3
+        # LANGGRAPH THREAD CONFIGURATION
+        # ========================================================
+
+        config = {
+            "configurable": {
+                "thread_id": (
+                    commerce_session.thread_id
+                )
+            }
+        }
+
         logger.info(
-            "Final message response_metadata: %r",
-            getattr(final_message, "response_metadata", None),
+            "Invoking persistent CommerceGraph."
+        )
+
+        # ========================================================
+        # STEP 4
+        # INVOKE GRAPH
+        # ========================================================
+
+        try:
+            result = await run_in_threadpool(
+                commerce_graph.invoke,
+                initial_state,
+                config,
+            )
+
+        except Exception:
+            logger.exception(
+                "CommerceGraph execution failed."
+            )
+
+            raise RuntimeError(
+                "Unable to process the commerce request."
+            )
+
+        if not result:
+            raise RuntimeError(
+                "CommerceGraph returned no result."
+            )
+
+        # ========================================================
+        # STEP 5
+        # EXTRACT GRAPH RESPONSE
+        # ========================================================
+
+        response_content = result.get(
+            "response"
+        )
+
+        error = result.get(
+            "error"
+        )
+
+        cart_changed = bool(
+            result.get(
+                "cart_changed",
+                False,
+            )
         )
 
         if not response_content:
-            raise RuntimeError("Agent returned an empty final response.")
 
-        logger.info("Final agent response extracted successfully.")
+            if error:
+                logger.warning(
+                    "CommerceGraph returned an error."
+                )
+
+                raise RuntimeError(
+                    str(error)
+                )
+
+            raise RuntimeError(
+                "CommerceGraph returned an empty response."
+            )
+
+        response_content = (
+            ChatService._normalize_response(
+                response_content
+            )
+        )
+
+        if not response_content:
+            raise RuntimeError(
+                "CommerceGraph returned an empty response."
+            )
+
+        # ========================================================
+        # STEP 6
+        # SYNCHRONIZE CART ASSOCIATION
+        # ========================================================
+        #
+        # The graph may:
+        #
+        # - reuse existing cart
+        # - create a new cart
+        # - replace an invalid cart
+        #
+        # If the graph returns a different cart_id, persist it
+        # against the application session.
+        #
+
+        result_cart_id = result.get(
+            "cart_id"
+        )
+
+        if (
+            result_cart_id
+            and result_cart_id
+            != commerce_session.cart_id
+        ):
+
+            logger.info(
+                (
+                    "CommerceGraph returned a new cart "
+                    "association. Persisting it."
+                )
+            )
+
+            try:
+                commerce_session = (
+                    await run_in_threadpool(
+                        SessionRepository.update_cart_id,
+                        commerce_session.session_id,
+                        result_cart_id,
+                    )
+                )
+
+            except Exception:
+                logger.exception(
+                    (
+                        "Unable to persist cart/session "
+                        "association."
+                    )
+                )
+
+                raise RuntimeError(
+                    (
+                        "The commerce operation completed, "
+                        "but its session state could not "
+                        "be persisted."
+                    )
+                )
+
+        else:
+
+            # Update session activity metadata.
+            #
+            # Failure to update last_activity_at should not
+            # fail an otherwise successful commerce request.
+
+            try:
+                await run_in_threadpool(
+                    SessionRepository.touch_session,
+                    commerce_session.session_id,
+                )
+
+            except Exception:
+                logger.exception(
+                    (
+                        "Unable to update commerce "
+                        "session activity time."
+                    )
+                )
+
+        # ========================================================
+        # STEP 7
+        # LOG SAFE EXECUTION METADATA
+        # ========================================================
+
+        logger.info(
+            (
+                "Commerce conversation completed. "
+                "intent=%s "
+                "cart_action=%s "
+                "cart_changed=%s "
+                "cart_present=%s"
+            ),
+            result.get(
+                "intent"
+            ),
+            result.get(
+                "cart_action"
+            ),
+            cart_changed,
+            bool(
+                result_cart_id
+                or commerce_session.cart_id
+            ),
+        )
+
+        # ========================================================
+        # STEP 8
+        # PUBLIC RESPONSE
+        # ========================================================
+        #
+        # Do NOT return:
+        #
+        # cart_id
+        # thread_id
+        #
 
         return {
             "success": True,
-            "response": response_content,
-            "cart_id": cart_id,
+
+            "response": (
+                response_content
+            ),
+
+            "session_id": (
+                commerce_session.session_id
+            ),
+
+            "cart_changed": (
+                cart_changed
+            ),
         }
 
     # ============================================================
-    # AGENT ROUTING
+    # NORMALIZE RESPONSE
     # ============================================================
 
     @staticmethod
-    def _is_cart_request(message: str) -> bool:
-        if not message:
-            return False
+    def _normalize_response(
+        response: Any,
+    ) -> str:
 
-        text = message.lower().strip()
+        if isinstance(
+            response,
+            str,
+        ):
+            return response.strip()
 
-        # Explicit cart references
-        if "cart" in text:
-            return True
+        if isinstance(
+            response,
+            list,
+        ):
 
-        # Quantity modification
-        quantity_patterns = [
-            r"\b(change|update|set|increase|decrease)\b.*\b(quantity|qty)\b",
-            r"\b(quantity|qty)\b.*\b(change|update|set|increase|decrease)\b",
-            r"\b(change|update|set)\b.*\bline\b",
-            r"\bline\s+\d+\b.*\b(quantity|qty)\b",
-            r"\b(make)\b.*\b(quantity|qty)\b",
-        ]
-        if any(re.search(pattern, text) for pattern in quantity_patterns):
-            return True
+            text_parts: list[str] = []
 
-        # Remove/delete item
-        remove_patterns = [
-            r"\b(remove|delete)\b.*\b(item|product|shoe|line)\b",
-            r"\btake\b.*\bout\b",
-        ]
-        if any(re.search(pattern, text) for pattern in remove_patterns):
-            return True
+            for block in response:
 
-        # Promotion / coupon / discount
-        promotion_keywords = [
-            "promotion",
-            "promo code",
-            "discount code",
-            "coupon",
-            "apply code",
-        ]
-        if any(keyword in text for keyword in promotion_keywords):
-            return True
+                if isinstance(
+                    block,
+                    str,
+                ):
+                    text_parts.append(
+                        block
+                    )
 
-        return False
+                elif isinstance(
+                    block,
+                    dict,
+                ):
 
-    # ============================================================
-    # NORMALIZE LLM RESPONSE
-    # ============================================================
+                    block_text = (
+                        block.get(
+                            "text"
+                        )
+                    )
 
-    @staticmethod
-    def _extract_message_text(message: Any) -> str:
-        # 1. Standard content extraction
-        content = getattr(message, "content", None)
-        extracted = ChatService._extract_text_content(content)
-
-        if extracted:
-            return extracted
-
-        # 2. Some LangChain model integrations expose normalized text separately
-        text_value = getattr(message, "text", None)
-        if callable(text_value):
-            try:
-                text_value = text_value()
-            except Exception:
-                text_value = None
-
-        if isinstance(text_value, str):
-            return text_value.strip()
-
-        return ""
-
-    @staticmethod
-    def _extract_text_content(content: Any) -> str:
-        # String response
-        if isinstance(content, str):
-            return content.strip()
-
-        # Structured list of content blocks
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    block_text = block.get("text")
                     if block_text:
-                        text_parts.append(str(block_text))
-                elif isinstance(block, str):
-                    text_parts.append(block)
+                        text_parts.append(
+                            str(
+                                block_text
+                            )
+                        )
 
-            return "\n".join(text_parts).strip()
+            return "\n".join(
+                text_parts
+            ).strip()
 
-        # Defensive fallback
-        if content is None:
+        if response is None:
             return ""
 
-        return str(content).strip()
+        return str(
+            response
+        ).strip()

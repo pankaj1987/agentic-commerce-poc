@@ -1,55 +1,57 @@
+# app/api/routes/chat_routes.py
+
 import logging
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.schemas.chat_schemas import (
-    ChatRequest,
-    ChatResponse,
-)
+from app.api.schemas.chat_schemas import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# main.py mounts this router at /api, so this router owns only /chat.
+router = APIRouter(
+    prefix="/chat",
+    tags=["chat"],
+)
 
 
 @router.post(
-    "/chat",
+    "",
     response_model=ChatResponse,
 )
 async def chat(
     request: ChatRequest,
-):
-    """
-    Process a natural-language commerce request.
+) -> ChatResponse:
+    """Process one commerce conversation turn.
 
-    The request is routed to the appropriate commerce agent.
+    The browser supplies only message + public session_id.
+    Shopify cart_id and LangGraph thread_id remain server-side.
     """
-
-    logger.info(
-        "Received /api/chat request. message=%s",
-        request.message,
-    )
 
     try:
         result = await ChatService.process_message(
             message=request.message,
-            cart_id=request.cart_id,
+            session_id=request.session_id,
         )
+        return ChatResponse(**result)
 
-        logger.info(
-            "Completed /api/chat request."
-        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
-        return result
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
 
-    except Exception as exc:
-        logger.exception(
-            "Error while processing /api/chat request."
-        )
-
+    except RuntimeError as exc:
+        logger.exception("Chat request failed.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to process chat request.",
+            detail=str(exc),
         ) from exc

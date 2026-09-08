@@ -1,13 +1,18 @@
 import { useState } from "react";
 
+import { sendChatMessage } from "../api/chatApi";
+
 import {
-  sendChatMessage,
-} from "../api/chatApi";
+  clearCommerceSessionId,
+  getCommerceSessionId,
+  hasCommerceSession,
+  saveCommerceSessionId,
+} from "../utils/sessionStorage";
 
 
 function ChatWindow({
-  cartId,
   onCartChanged,
+  onNewConversation,
 }) {
   const [messages, setMessages] =
     useState([]);
@@ -18,215 +23,313 @@ function ChatWindow({
   const [loading, setLoading] =
     useState(false);
 
+  const [resetting, setResetting] =
+    useState(false);
 
-  // ============================================================
-  // SEND CHAT MESSAGE
-  // ============================================================
+  const [sessionActive, setSessionActive] =
+    useState(() => hasCommerceSession());
 
-  const sendMessage = async () => {
-    const message =
-      input.trim();
 
-    if (!message || loading) {
+  const appendMessage = (message) => {
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      message,
+    ]);
+  };
+
+
+  const isInvalidSessionError = (
+    requestError
+  ) => {
+    const status =
+      requestError?.response?.status;
+
+    const detail = String(
+      requestError?.response?.data?.detail || ""
+    ).toLowerCase();
+
+    return (
+      [400, 404, 410].includes(status) &&
+      (
+        detail.includes("session") &&
+        (
+          detail.includes("does not exist") ||
+          detail.includes("not active") ||
+          detail.includes("expired") ||
+          detail.includes("not found")
+        )
+      )
+    );
+  };
+
+
+  const executeChatRequest = (
+    userMessage,
+    sessionId
+  ) => {
+    return sendChatMessage(
+      userMessage,
+      sessionId
+    );
+  };
+
+
+  const handleSendMessage = async () => {
+    const userMessage = input.trim();
+
+    if (
+      !userMessage ||
+      loading ||
+      resetting
+    ) {
       return;
     }
 
-    // Add user message immediately.
-    setMessages((previous) => [
-      ...previous,
-      {
-        role: "user",
-        content: message,
-      },
-    ]);
+    appendMessage({
+      role: "user",
+      content: userMessage,
+    });
 
     setInput("");
     setLoading(true);
 
     try {
-      // ---------------------------------------------------------
-      // Send request to FastAPI /api/chat
-      // ---------------------------------------------------------
+      let sessionId =
+        getCommerceSessionId();
 
-      const result =
-        await sendChatMessage(
-          message,
-          cartId
+      let result;
+
+      try {
+        result = await executeChatRequest(
+          userMessage,
+          sessionId
         );
+      } catch (requestError) {
+        // Retry once only when session lookup itself is stale/invalid.
+        if (
+          sessionId &&
+          isInvalidSessionError(requestError)
+        ) {
+          clearCommerceSessionId();
+          setSessionActive(false);
 
+          let newSessionId = null;
 
-      // ---------------------------------------------------------
-      // Add AI response to chat
-      // ---------------------------------------------------------
+          if (
+            typeof onNewConversation ===
+            "function"
+          ) {
+            newSessionId =
+              await onNewConversation();
+          }
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: result.response,
-        },
-      ]);
-
-
-      // ---------------------------------------------------------
-      // Refresh cart after successful chat request.
-      //
-      // The Cart Agent may have changed Shopify cart state through:
-      //
-      // - add_to_cart
-      // - update_quantity
-      // - remove_from_cart
-      // - apply_promotion
-      //
-      // React does not automatically know that Shopify changed,
-      // so retrieve the latest cart and update CommercePage state.
-      // ---------------------------------------------------------
-
-      if (
-        cartId &&
-        onCartChanged
-      ) {
-        try {
-          await onCartChanged();
-        } catch (cartRefreshError) {
-          console.error(
-            "Unable to refresh cart after chat operation:",
-            cartRefreshError
+          result = await executeChatRequest(
+            userMessage,
+            newSessionId
           );
+        } else {
+          throw requestError;
         }
       }
 
-    } catch (error) {
+      if (result.session_id) {
+        saveCommerceSessionId(
+          result.session_id
+        );
+        setSessionActive(true);
+      }
+
+      appendMessage({
+        role: "assistant",
+        content:
+          result.response ||
+          "No response was returned.",
+      });
+
+      if (
+        result.cart_changed &&
+        typeof onCartChanged === "function"
+      ) {
+        await onCartChanged();
+      }
+    } catch (requestError) {
       console.error(
-        "Chat error:",
-        error
+        "Chat request failed:",
+        requestError
       );
 
-
-      // ---------------------------------------------------------
-      // Display API error when available
-      // ---------------------------------------------------------
-
       const errorMessage =
-        error.response?.data?.detail ||
-        "Unable to process the request.";
+        requestError?.response?.data?.detail ||
+        requestError?.message ||
+        "Unable to process your request.";
 
-
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: errorMessage,
-        },
-      ]);
-
+      appendMessage({
+        role: "assistant",
+        content:
+          "Sorry, I could not process that request. " +
+          errorMessage,
+        error: true,
+      });
     } finally {
       setLoading(false);
     }
   };
 
 
-  // ============================================================
-  // ENTER KEY HANDLER
-  // ============================================================
+  const handleNewConversation = async () => {
+    if (loading || resetting) {
+      return;
+    }
 
-  const handleKeyDown = (
-    event
-  ) => {
+    setResetting(true);
+
+    try {
+      clearCommerceSessionId();
+      setSessionActive(false);
+      setMessages([]);
+      setInput("");
+
+      if (
+        typeof onNewConversation ===
+        "function"
+      ) {
+        const newSessionId =
+          await onNewConversation();
+
+        if (newSessionId) {
+          saveCommerceSessionId(
+            newSessionId
+          );
+          setSessionActive(true);
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Unable to start new conversation:",
+        error
+      );
+
+      appendMessage({
+        role: "assistant",
+        content:
+          "Unable to start a new conversation.",
+        error: true,
+      });
+    } finally {
+      setResetting(false);
+    }
+  };
+
+
+  const handleKeyDown = (event) => {
     if (
       event.key === "Enter" &&
       !event.shiftKey
     ) {
       event.preventDefault();
-
-      sendMessage();
+      handleSendMessage();
     }
   };
 
 
-  // ============================================================
-  // UI
-  // ============================================================
-
   return (
     <div className="chat-panel">
+      <div className="chat-header">
+        <div>
+          <h2>AI Commerce Assistant</h2>
+          <div className="chat-session-status">
+            {sessionActive
+              ? "Conversation active"
+              : "New conversation"}
+          </div>
+        </div>
 
-      <h2>
-        AI Commerce Assistant
-      </h2>
-
+        <button
+          type="button"
+          className="new-chat-button"
+          onClick={handleNewConversation}
+          disabled={loading || resetting}
+        >
+          {resetting
+            ? "Starting..."
+            : "New conversation"}
+        </button>
+      </div>
 
       <div className="chat-messages">
-
         {messages.length === 0 && (
-          <div className="chat-welcome">
-            Ask me about products,
-            benefits, promotions or your
-            shopping cart.
+          <div className="chat-empty-state">
+            Ask about products, inventory,
+            product benefits, policies,
+            promotions, or your shopping cart.
           </div>
         )}
 
+        {messages.map((message, index) => {
+          const isUser =
+            message.role === "user";
 
-        {messages.map(
-          (message, index) => (
+          return (
             <div
-              key={index}
-              className={
-                message.role === "user"
-                  ? "message user-message"
-                  : "message assistant-message"
-              }
+              key={`${message.role}-${index}`}
+              className={[
+                "message",
+                isUser
+                  ? "user-message"
+                  : "assistant-message",
+                message.error
+                  ? "message-error"
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
-              {message.content}
-            </div>
-          )
-        )}
+              <div className="message-role">
+                {isUser ? "You" : "Assistant"}
+              </div>
 
+              <div>{message.content}</div>
+            </div>
+          );
+        })}
 
         {loading && (
           <div className="message assistant-message">
-            Thinking...
+            <div className="message-role">
+              Assistant
+            </div>
+            <div>Thinking...</div>
           </div>
         )}
-
       </div>
 
-
       <div className="chat-input">
-
         <textarea
           value={input}
-          placeholder="Ask the AI commerce assistant..."
+          placeholder="Ask about products, inventory, policies, or your cart..."
           onChange={(event) =>
-            setInput(
-              event.target.value
-            )
+            setInput(event.target.value)
           }
-          onKeyDown={
-            handleKeyDown
-          }
-          disabled={loading}
+          onKeyDown={handleKeyDown}
+          disabled={loading || resetting}
+          rows={3}
         />
 
-
         <button
-          onClick={
-            sendMessage
-          }
+          type="button"
+          onClick={handleSendMessage}
           disabled={
             loading ||
+            resetting ||
             !input.trim()
           }
         >
-          {loading
-            ? "Processing..."
-            : "Send"}
+          {loading ? "Sending..." : "Send"}
         </button>
-
       </div>
-
     </div>
   );
 }
+
 
 export default ChatWindow;

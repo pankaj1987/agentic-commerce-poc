@@ -1,8 +1,6 @@
-# app/graph/product_node.py
-
 import logging
 
-from app.agents.product_agent import product_agent
+from app.agents.order_agent import order_agent
 from app.graph.state import CommerceState
 from app.utils.message_utils import extract_message_text
 
@@ -10,15 +8,10 @@ from app.utils.message_utils import extract_message_text
 logger = logging.getLogger(__name__)
 
 
-def product_node(
-    state: CommerceState,
-) -> dict:
+def order_node(state: CommerceState) -> dict:
+    logger.info("Executing Order node.")
 
-    logger.info(
-        "Executing Product node."
-    )
-
-    result = product_agent.invoke(
+    result = order_agent.invoke(
         {
             "messages": [
                 {
@@ -29,23 +22,16 @@ def product_node(
         }
     )
 
-    messages = result.get(
-        "messages",
-        [],
-    )
-
+    messages = result.get("messages", [])
     if not messages:
         return {
-            "error": (
-                "Product Agent returned no response."
-            )
+            "error": "Order Agent returned no response.",
+            "cart_changed": False,
         }
 
-    response = extract_message_text(
-        messages[-1]
-    )
-
+    response = extract_message_text(messages[-1])
     return {
         "response": response,
+        "intent": "order",
         "cart_changed": False,
     }
