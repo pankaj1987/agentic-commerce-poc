@@ -3,34 +3,24 @@
 const SESSION_STORAGE_KEY =
   "agentic_commerce_session_id";
 
+const LEGACY_CART_STORAGE_KEY =
+  "shopify_cart_id";
 
-/**
- * Return the current public commerce session ID.
- *
- * The browser must never store:
- * - Shopify cart_id
- * - LangGraph thread_id
- */
+
 export function getCommerceSessionId() {
-  const sessionId =
-    localStorage.getItem(
-      SESSION_STORAGE_KEY
-    );
+  const sessionId = localStorage.getItem(
+    SESSION_STORAGE_KEY
+  );
 
   if (!sessionId) {
     return null;
   }
 
-  const normalized =
-    sessionId.trim();
-
+  const normalized = sessionId.trim();
   return normalized || null;
 }
 
 
-/**
- * Persist the public commerce session returned by the backend.
- */
 export function saveCommerceSessionId(
   sessionId
 ) {
@@ -52,9 +42,6 @@ export function saveCommerceSessionId(
 }
 
 
-/**
- * Remove the current browser-side conversation identity.
- */
 export function clearCommerceSessionId() {
   localStorage.removeItem(
     SESSION_STORAGE_KEY
@@ -62,11 +49,17 @@ export function clearCommerceSessionId() {
 }
 
 
-/**
- * Return whether a conversation session currently exists.
- */
 export function hasCommerceSession() {
   return Boolean(
     getCommerceSessionId()
+  );
+}
+
+
+// One-time migration helper for browsers that ran the Phase 2 UI.
+// Phase 3 never persists the Shopify cart ID in browser storage.
+export function clearLegacyCartStorage() {
+  localStorage.removeItem(
+    LEGACY_CART_STORAGE_KEY
   );
 }

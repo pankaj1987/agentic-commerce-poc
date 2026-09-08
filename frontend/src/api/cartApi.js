@@ -1,130 +1,102 @@
 import apiClient from "./apiClient";
 
 
-// ============================================================
-// CREATE CART
-// POST /api/cart
-// ============================================================
+// The browser sends only the public commerce session ID.
+// Shopify cart IDs stay server-side.
 
-export const createCart = async () => {
-  const response =
-    await apiClient.post(
-      "/api/cart"
-    );
+export const createCart = async (
+  sessionId = null
+) => {
+  const response = await apiClient.post(
+    "/api/cart",
+    {
+      session_id: sessionId || null,
+    }
+  );
 
   return response.data;
 };
 
-
-// ============================================================
-// GET CART
-// GET /api/cart?cart_id=...
-// ============================================================
 
 export const getCart = async (
-  cartId
+  sessionId
 ) => {
-  const response =
-    await apiClient.get(
-      "/api/cart",
-      {
-        params: {
-          cart_id: cartId,
-        },
-      }
-    );
+  const response = await apiClient.get(
+    "/api/cart",
+    {
+      params: {
+        session_id: sessionId,
+      },
+    }
+  );
 
   return response.data;
 };
 
 
-// ============================================================
-// ADD ITEM
-// POST /api/cart/items
-// ============================================================
-
 export const addCartItem = async (
-  cartId,
+  sessionId,
   variantId,
   quantity = 1
 ) => {
-  const response =
-    await apiClient.post(
-      "/api/cart/items",
-      {
-        cart_id: cartId,
-        variant_id: variantId,
-        quantity,
-      }
-    );
+  const response = await apiClient.post(
+    "/api/cart/items",
+    {
+      session_id: sessionId,
+      variant_id: variantId,
+      quantity,
+    }
+  );
 
   return response.data;
 };
 
 
-// ============================================================
-// UPDATE ITEM QUANTITY
-// PATCH /api/cart/items
-// ============================================================
-
 export const updateCartItem = async (
-  cartId,
+  sessionId,
   lineId,
   quantity
 ) => {
-  const response =
-    await apiClient.patch(
-      "/api/cart/items",
-      {
-        cart_id: cartId,
-        line_id: lineId,
-        quantity,
-      }
-    );
+  const response = await apiClient.patch(
+    "/api/cart/items",
+    {
+      session_id: sessionId,
+      line_id: lineId,
+      quantity,
+    }
+  );
 
   return response.data;
 };
 
-
-// ============================================================
-// REMOVE ITEM
-// POST /api/cart/items/remove
-// ============================================================
 
 export const removeCartItem = async (
-  cartId,
+  sessionId,
   lineId
 ) => {
-  const response =
-    await apiClient.post(
-      "/api/cart/items/remove",
-      {
-        cart_id: cartId,
-        line_id: lineId,
-      }
-    );
+  const response = await apiClient.post(
+    "/api/cart/items/remove",
+    {
+      session_id: sessionId,
+      line_id: lineId,
+    }
+  );
 
   return response.data;
 };
 
 
-// ============================================================
-// APPLY PROMOTION
-// POST /api/cart/promotion
-// ============================================================
-
 export const applyPromotion = async (
-  cartId,
+  sessionId,
   discountCode
 ) => {
-  const response =
-    await apiClient.post(
-      "/api/cart/promotion",
-      {
-        cart_id: cartId,
-        discount_code: discountCode,
-      }
-    );
+  const response = await apiClient.post(
+    "/api/cart/promotion",
+    {
+      session_id: sessionId,
+      discount_code: discountCode,
+    }
+  );
 
   return response.data;
 };

@@ -1129,6 +1129,12 @@ orchestration_builder.add_edge(
 # PUBLIC COMMERCE GRAPH
 # ============================================================
 
+# Only the OUTER graph is checkpointed. The inner domain graph remains
+# transient and executes the planner's self-contained tasks.
+checkpointer = get_checkpointer()
+
 commerce_graph = (
-    orchestration_builder.compile()
+    orchestration_builder.compile(
+        checkpointer=checkpointer
+    )
 )

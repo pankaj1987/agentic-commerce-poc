@@ -2,26 +2,17 @@
 
 import logging
 
-from fastapi import (
-    APIRouter,
-    HTTPException,
-    status,
-)
+from fastapi import APIRouter, HTTPException, status
 
-from app.api.schemas.chat_schemas import (
-    ChatRequest,
-    ChatResponse,
-)
-from app.services.chat_service import (
-    ChatService,
-)
+from app.api.schemas.chat_schemas import ChatRequest, ChatResponse
+from app.services.chat_service import ChatService
 
 
 logger = logging.getLogger(__name__)
 
-
+# main.py mounts this router at /api, so this router owns only /chat.
 router = APIRouter(
-    prefix="/api/chat",
+    prefix="/chat",
     tags=["chat"],
 )
 
@@ -33,16 +24,10 @@ router = APIRouter(
 async def chat(
     request: ChatRequest,
 ) -> ChatResponse:
-    """
-    Process one commerce conversation turn.
+    """Process one commerce conversation turn.
 
-    Browser supplies:
-        message
-        session_id
-
-    Browser never supplies:
-        Shopify cart_id
-        LangGraph thread_id
+    The browser supplies only message + public session_id.
+    Shopify cart_id and LangGraph thread_id remain server-side.
     """
 
     try:
@@ -50,10 +35,7 @@ async def chat(
             message=request.message,
             session_id=request.session_id,
         )
-
-        return ChatResponse(
-            **result
-        )
+        return ChatResponse(**result)
 
     except ValueError as exc:
         raise HTTPException(
@@ -68,13 +50,8 @@ async def chat(
         ) from exc
 
     except RuntimeError as exc:
-        logger.exception(
-            "Chat request failed."
-        )
-
+        logger.exception("Chat request failed.")
         raise HTTPException(
-            status_code=(
-                status.HTTP_500_INTERNAL_SERVER_ERROR
-            ),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc

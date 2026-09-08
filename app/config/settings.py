@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     llm_model: str = "gpt-oss:20b"
     google_api_key: str | None = None
+    azure_openai_api_key: str | None = None
+    azure_openai_endpoint: str | None = None
+    azure_openai_api_version: str | None = None
+    azure_openai_deployment: str | None = None
 
     database_url: str
     langgraph_checkpoint_database_url: str

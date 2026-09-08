@@ -189,6 +189,11 @@ def plan_tasks_node(
         )
     )
 
+    logger.info(
+        "Planner previous conversation history:\n%s",
+        recent_history,
+    )
+
     llm = get_llm()
 
     structured_llm = (
@@ -286,6 +291,28 @@ Current request:
 Good planned task:
 intent = cart
 query = "Add 2 Athletic Running Shoes US 8 / Black to my cart."
+
+IMPORTANT conversational conditional example:
+
+Previous conversation:
+Customer: Is Athletic Running Shoes US 8 / Black available?
+Assistant: Yes, Athletic Running Shoes US 8 / Black is available.
+
+Current request:
+"If available add 2 of those to my cart."
+
+Good planned task:
+intent = conditional
+query = (
+    "Check whether Athletic Running Shoes US 8 / Black has at least "
+    "2 units available and, if available, add 2 to my cart."
+)
+
+For a CURRENT request containing "if available", "if in stock",
+"only if available", or equivalent dependency language, use conditional
+even when the product/variant comes from conversation history. Re-check live
+inventory before mutating the cart; do not rely only on an older assistant
+answer.
 
 CRITICAL:
 - Do NOT repeat a previous action merely because it appears in history.

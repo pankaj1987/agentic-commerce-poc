@@ -323,3 +323,65 @@ button {
     flex-direction: column;
   }
 }
+/* ============================================================
+   PHASE 3 CHAT SESSION UI
+   ============================================================ */
+
+.chat-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.chat-header h2 {
+  margin: 0;
+}
+
+.chat-session-status {
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.new-chat-button {
+  flex: 0 0 auto;
+  padding: 9px 14px;
+}
+
+.chat-empty-state {
+  color: #6b7280;
+  padding: 18px;
+  text-align: center;
+}
+
+.message-role {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b7280;
+}
+
+.message-error {
+  border-color: #fca5a5;
+}
+
+@media (max-width: 700px) {
+  .chat-header {
+    flex-direction: column;
+  }
+
+  .new-chat-button {
+    width: 100%;
+  }
+
+  .chat-input {
+    flex-direction: column;
+  }
+
+  .chat-input button {
+    width: 100%;
+    min-height: 42px;
+  }
+}

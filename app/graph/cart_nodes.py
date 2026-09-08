@@ -8,6 +8,7 @@ from app.config.llm import get_llm
 from app.graph.state import CommerceState
 
 from app.tools.cart_tools import (
+    create_cart,
     get_cart,
     add_to_cart,
     update_quantity,
@@ -523,13 +524,28 @@ def add_cart_node(
         "cart_id"
     )
 
+    # Lazy cart creation: a session may exist without a Shopify cart.
+    # Create the cart only when the customer performs the first ADD.
     if not cart_id:
-        return {
-            "response": (
-                "No active shopping cart was found."
-            ),
-            "cart_changed": False,
-        }
+        create_result = create_cart.invoke({})
+
+        if not create_result.get("success"):
+            return {
+                "response": create_result.get(
+                    "message",
+                    "Unable to create a shopping cart.",
+                ),
+                "cart_changed": False,
+            }
+
+        created_cart = create_result.get("cart") or {}
+        cart_id = created_cart.get("id")
+
+        if not cart_id:
+            return {
+                "response": "Unable to create a shopping cart.",
+                "cart_changed": False,
+            }
 
     variant_id = state.get(
         "resolved_variant_id"
@@ -590,6 +606,9 @@ def add_cart_node(
             f"Added {quantity} "
             f"{product_label} to your cart."
         ),
+        # Propagate a lazily-created cart ID to the outer graph.
+        # ChatService persists it against CommerceSession.
+        "cart_id": cart_id,
         "cart_changed": True,
     }
 

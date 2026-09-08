@@ -12,7 +12,10 @@ from app.clients.shopify_client import (
 )
 from app.config.llm import get_llm
 from app.graph.state import CommerceState
-from app.tools.cart_tools import add_to_cart
+from app.tools.cart_tools import (
+    add_to_cart,
+    create_cart,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -431,14 +434,31 @@ def conditional_add_cart_node(
         "cart_id"
     )
 
+    # Lazy cart creation. The inventory check is allowed to run with
+    # cart_id=None. Only after the condition succeeds do we create a cart.
     if not cart_id:
-        return {
-            "response": (
-                "The requested product is available, "
-                "but no active shopping cart was found."
-            ),
-            "cart_changed": False,
-        }
+        create_result = create_cart.invoke({})
+
+        if not create_result.get("success"):
+            return {
+                "response": create_result.get(
+                    "message",
+                    "The product is available, but a shopping cart could not be created.",
+                ),
+                "cart_changed": False,
+            }
+
+        created_cart = create_result.get("cart") or {}
+        cart_id = created_cart.get("id")
+
+        if not cart_id:
+            return {
+                "response": (
+                    "The product is available, but a shopping cart "
+                    "could not be created."
+                ),
+                "cart_changed": False,
+            }
 
     variant_id = state.get(
         "resolved_variant_id"
@@ -527,6 +547,9 @@ def conditional_add_cart_node(
             f"Added {quantity} "
             f"{product_label} to your cart."
         ),
+        # Propagate a lazily-created cart ID to the outer graph so the
+        # application session can own the Shopify cart from this point on.
+        "cart_id": cart_id,
         "cart_changed": True,
     }
 
