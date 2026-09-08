@@ -34,6 +34,7 @@ from app.graph.cart_router import route_cart_action
 from app.graph.knowledge_node import knowledge_node
 from app.graph.planner import plan_tasks_node
 from app.graph.product_node import product_node
+from app.graph.order_node import order_node
 from app.graph.router import route_intent
 from app.graph.state import CommerceState
 from app.persistence.checkpointer import get_checkpointer
@@ -73,6 +74,7 @@ def domain_entry_node(
         "knowledge",
         "cart",
         "conditional",
+        "order",
     }:
         logger.info(
             "Using planner-selected domain intent: %s",
@@ -307,6 +309,11 @@ domain_builder.add_node(
 )
 
 domain_builder.add_node(
+    "order",
+    order_node,
+)
+
+domain_builder.add_node(
     "cart_router",
     route_cart_action,
 )
@@ -460,6 +467,7 @@ domain_builder.add_conditional_edges(
         "knowledge": "knowledge",
         "cart": "cart_router",
         "conditional": "conditional_extract",
+        "order": "order",
         "unknown": "unknown_intent",
     },
 )
@@ -611,6 +619,11 @@ domain_builder.add_edge(
 
 domain_builder.add_edge(
     "knowledge",
+    END,
+)
+
+domain_builder.add_edge(
+    "order",
     END,
 )
 
@@ -814,6 +827,7 @@ def execute_planned_tasks_node(
                 "knowledge",
                 "cart",
                 "conditional",
+                "order",
             }
             else "unknown"
         )

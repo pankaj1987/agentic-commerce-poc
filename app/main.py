@@ -48,6 +48,10 @@ from app.api.routes.chat_routes import (
     router as chat_router,
 )
 
+from app.api.routes.order_routes import (
+    router as order_router,
+)
+
 
 # ============================================================
 # LOGGING
@@ -189,6 +193,19 @@ app.include_router(
     prefix="/api/cart",
     tags=[
         "Cart"
+    ],
+)
+
+
+# ============================================================
+# ORDER ROUTES
+# ============================================================
+
+app.include_router(
+    order_router,
+    prefix="/api/orders",
+    tags=[
+        "Orders"
     ],
 )
 

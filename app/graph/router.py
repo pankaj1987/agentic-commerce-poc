@@ -80,6 +80,32 @@ def route_intent(
             "intent": "cart"
         }
 
+
+    # --------------------------------------------
+    # ORDER
+    # --------------------------------------------
+
+    order_patterns = [
+        r"\border\s*#?\w+",
+        r"\border status\b",
+        r"\btrack\b.*\border\b",
+        r"\border details?\b",
+        r"\border history\b",
+        r"\brecent orders?\b",
+        r"\bmy orders?\b",
+        r"\bcancel\b.*\border\b",
+        r"\breturn\b.*\border\b",
+        r"\border\b.*\b(cancel|return|refund|status|track|details?)\b",
+    ]
+
+    if any(
+        re.search(pattern, text)
+        for pattern in order_patterns
+    ):
+        return {
+            "intent": "order"
+        }
+
     # --------------------------------------------
     # KNOWLEDGE / RAG
     # --------------------------------------------

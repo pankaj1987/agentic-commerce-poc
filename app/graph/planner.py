@@ -19,6 +19,7 @@ class PlannedTask(BaseModel):
         "knowledge",
         "cart",
         "conditional",
+        "order",
     ] = Field(
         description=(
             "Commerce domain that should execute this task."
@@ -243,7 +244,25 @@ The available domains are:
    - cart subtotal
    - cart total
 
-4. conditional
+4. order
+   Use for live, transaction-specific order questions.
+
+   Examples:
+   - find/look up order #1001
+   - order status or tracking
+   - order details / items / totals
+   - recent order history for a customer email
+   - whether a specific order can be cancelled
+   - whether items from a specific order can be returned
+
+   IMPORTANT:
+   - General return/refund policy with no specific order is knowledge.
+   - Return eligibility for a specific order is order because it requires
+     both live order facts and static policy.
+   - Phase 4 checks cancellation/return eligibility only; it does not
+     perform destructive mutations.
+
+5. conditional
    Use ONLY for a supported dependent commerce workflow where a
    cart mutation depends on a live inventory result.
 
@@ -349,6 +368,25 @@ Plan:
 1. cart task
 2. knowledge task
 
+ORDER ROUTING EXAMPLES:
+
+"Where is order #1001?"
+-> one order task
+
+"Show details for order #1001 and tell me the return policy."
+-> order task, then knowledge task
+
+"Can I return the shoes from order #1001?"
+-> one order task. The Order Agent will combine live order facts with
+   return-policy knowledge.
+
+"Can I cancel order #1001?"
+-> one order task.
+
+"Show my recent orders for customer@example.com"
+-> one order task.
+
+============================================================
 ============================================================
 CONDITIONAL RULES
 ============================================================
@@ -398,26 +436,49 @@ CURRENT CUSTOMER REQUEST
 """
 
     try:
-        plan = structured_llm.invoke(
-            prompt
-        )
+        plan = structured_llm.invoke(prompt)
 
     except Exception:
         logger.exception(
-            "Commerce planner failed."
+            "Commerce planner structured output failed. Retrying once."
         )
 
-        # The outer graph can still fall back to its deterministic
-        # routing when the planner cannot produce structured output.
-        return {
-            "tasks": [
-                {
-                    "intent": "auto",
-                    "query": user_message,
-                }
-            ],
-            "error": None,
-        }
+        retry_prompt = f"""
+Return ONLY a valid structured commerce plan.
+Do not omit any independent customer goal.
+Do not add commentary or markdown.
+
+Allowed intents: product, knowledge, cart, conditional, order.
+
+Rules:
+- A specific order lookup/status/details/history/cancel/return question -> order.
+- A general static return/shipping/delivery/promotion policy -> knowledge.
+- Inventory-dependent add-to-cart -> one conditional task.
+- Independent policy question plus another commerce operation -> separate knowledge task.
+- Resolve clear references using previous conversation only.
+
+Previous conversation:
+{recent_history}
+
+Current request:
+{user_message}
+"""
+
+        try:
+            plan = structured_llm.invoke(retry_prompt)
+        except Exception:
+            logger.exception(
+                "Commerce planner retry failed. Falling back to deterministic routing."
+            )
+            return {
+                "tasks": [
+                    {
+                        "intent": "auto",
+                        "query": user_message,
+                    }
+                ],
+                "error": None,
+            }
 
     tasks = [
         {

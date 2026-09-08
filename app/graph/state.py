@@ -12,6 +12,7 @@ class CommerceTask(TypedDict):
         "knowledge",
         "cart",
         "conditional",
+        "order",
         "auto",
     ]
     query: str
@@ -56,6 +57,7 @@ class CommerceState(TypedDict, total=False):
         "knowledge",
         "cart",
         "conditional",
+        "order",
         "multi",
         "unknown",
     ]
