@@ -4,6 +4,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.rag.vector_store import get_vector_store
+from app.security.rag_security import RagSecurityService
 
 
 KNOWLEDGE_BASE_PATH = Path(
@@ -26,7 +27,13 @@ def load_knowledge_documents() -> list[Document]:
         if not section:
             continue
 
+        # Knowledge is data, not executable instruction. Reject sections that
+        # contain prompt/tool/secret-exfiltration patterns before indexing.
+        if RagSecurityService.is_suspicious_content(section):
+            continue
+
         metadata = extract_metadata(section)
+        metadata["security_boundary"] = "untrusted_reference_data"
 
         documents.append(
             Document(

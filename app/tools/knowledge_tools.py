@@ -1,6 +1,8 @@
 from langchain_core.tools import tool
 
 from app.rag.retriever import search_knowledge_documents
+from app.security.tool_authorization import authorize_current_tool
+from app.security.rag_security import RagSecurityService
 
 
 def detect_knowledge_scope(
@@ -117,6 +119,7 @@ def search_knowledge(query: str) -> str:
     product-specific information.
     """
 
+    authorize_current_tool("search_knowledge")
     category, product_name = detect_knowledge_scope(query)
 
     documents = search_knowledge_documents(
@@ -124,6 +127,8 @@ def search_knowledge(query: str) -> str:
         category=category,
         product_name=product_name,
     )
+
+    documents = RagSecurityService.filter_documents(documents)
 
     if not documents:
         return (
@@ -134,6 +139,6 @@ def search_knowledge(query: str) -> str:
     results = []
 
     for document in documents:
-        results.append(document.page_content)
+        results.append(RagSecurityService.wrap_reference_text(document.page_content))
 
     return "\n\n---\n\n".join(results)

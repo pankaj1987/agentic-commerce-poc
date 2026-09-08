@@ -5,7 +5,9 @@ import logging
 from pydantic import BaseModel, Field
 
 from app.config.llm import get_llm
+from app.config.settings import settings
 from app.graph.state import CommerceState
+from app.security.validation import validate_explicit_cart_quantity, validate_quantity
 
 from app.tools.cart_tools import (
     create_cart,
@@ -48,6 +50,7 @@ class AddCartRequest(BaseModel):
     quantity: int = Field(
         default=1,
         ge=1,
+        le=settings.max_cart_item_quantity,
         description=(
             "Quantity requested by the customer. "
             "Use 1 when quantity is not specified."
@@ -84,6 +87,7 @@ class UpdateCartRequest(BaseModel):
 
     quantity: int = Field(
         ge=1,
+        le=settings.max_cart_item_quantity,
         description=(
             "New quantity explicitly requested by the customer."
         ),
@@ -91,18 +95,25 @@ class UpdateCartRequest(BaseModel):
 
 
 class RemoveCartRequest(BaseModel):
-    """
-    Structured representation of a remove-from-cart request.
+    """Structured representation of a remove-from-cart request.
 
-    Phase 2 initial version supports removal by cart line number.
+    A customer may identify the target by visible cart line number or by
+    product/variant description. The actual Shopify line ID is always
+    resolved from the live cart, never invented by the LLM.
     """
 
-    line_number: int = Field(
+    line_number: int | None = Field(
+        default=None,
         ge=1,
-        description=(
-            "One-based cart line number explicitly supplied "
-            "by the customer."
-        ),
+        description="Optional one-based cart line number explicitly supplied by the customer.",
+    )
+    product_name: str | None = Field(
+        default=None,
+        description="Optional customer-facing product name to remove.",
+    )
+    variant_title: str | None = Field(
+        default=None,
+        description="Optional variant information such as 'US 8 / Black'.",
     )
 
 
@@ -338,6 +349,14 @@ def extract_add_request(
             )
         }
 
+    # Security/business validation MUST happen before the LLM. Local models
+    # can normalize "-2" to 2 or replace 0 with a default quantity, which
+    # would bypass a Pydantic constraint applied only after extraction.
+    try:
+        explicit_quantity = validate_explicit_cart_quantity(user_message)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
     llm = get_llm()
 
     structured_llm = (
@@ -398,7 +417,7 @@ quantity = 1
             result.variant_title
         ),
         "quantity": (
-            result.quantity
+            explicit_quantity if explicit_quantity is not None else result.quantity
         ),
     }
 
@@ -568,6 +587,14 @@ def add_cart_node(
     if quantity is None:
         quantity = 1
 
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
+        return {
+            "response": str(exc),
+            "cart_changed": False,
+        }
+
     result = add_to_cart.invoke(
         {
             "cart_id": cart_id,
@@ -637,6 +664,11 @@ def extract_update_request(
                 "No user message was provided."
             )
         }
+
+    try:
+        explicit_quantity = validate_explicit_cart_quantity(user_message)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     llm = get_llm()
 
@@ -719,7 +751,7 @@ Rules:
             result.variant_title
         ),
         "quantity": (
-            result.quantity
+            explicit_quantity if explicit_quantity is not None else result.quantity
         ),
     }
 
@@ -758,6 +790,14 @@ def update_cart_node(
             "response": (
                 "The requested quantity could not be identified."
             ),
+            "cart_changed": False,
+        }
+
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
+        return {
+            "response": str(exc),
             "cart_changed": False,
         }
 
@@ -834,86 +874,45 @@ def update_cart_node(
 def extract_remove_request(
     state: CommerceState,
 ) -> dict:
-    """
-    Extract the cart line number from a remove request.
+    """Extract a deterministic cart-line selector from a remove request."""
 
-    Phase 2 initial implementation supports requests such as:
-    "Remove line 1"
-    """
-
-    logger.info(
-        "Executing remove-from-cart request extraction node."
-    )
-
-    user_message = state.get(
-        "user_message",
-        "",
-    )
-
+    logger.info("Executing remove-from-cart request extraction node.")
+    user_message = state.get("user_message", "")
     if not user_message:
-        return {
-            "error": (
-                "No user message was provided."
-            )
-        }
+        return {"error": "No user message was provided."}
 
     llm = get_llm()
-
-    structured_llm = (
-        llm.with_structured_output(
-            RemoveCartRequest
-        )
-    )
-
+    structured_llm = llm.with_structured_output(RemoveCartRequest)
     prompt = f"""
-Extract the cart line number from this remove-from-cart request.
+Extract which item the customer wants removed from the live cart.
 
 Customer request:
-
 {user_message}
 
-Example:
-
-Customer:
-"Remove line 1"
-
-Output meaning:
-
-line_number = 1
+Return any selector explicitly supplied by the customer:
+- line_number when they say e.g. "remove line 2"
+- product_name when they identify a product e.g. "remove running shoe"
+- variant_title when they identify a variant e.g. "remove Athletic Running Shoes US 8 / Black"
 
 Rules:
-
-- Return the line number explicitly supplied by the customer.
-- Do not invent a cart line.
+- Do not invent a line number.
 - Do not invent a Shopify line ID.
+- Do not invent product or variant attributes.
+- At least one of line_number, product_name, variant_title must come from the request.
 """
-
     try:
-        result = structured_llm.invoke(
-            prompt
-        )
-
+        result = structured_llm.invoke(prompt)
     except Exception:
-        logger.exception(
-            "Unable to extract remove-from-cart request."
-        )
+        logger.exception("Unable to extract remove-from-cart request.")
+        return {"error": "Unable to determine which cart item should be removed."}
 
-        return {
-            "error": (
-                "Unable to determine which cart line "
-                "should be removed."
-            )
-        }
-
-    logger.info(
-        "Remove request extracted. line_number=%s",
-        result.line_number,
-    )
+    if not any([result.line_number, result.product_name, result.variant_title]):
+        return {"error": "Unable to determine which cart item should be removed."}
 
     return {
-        "line_number": (
-            result.line_number
-        )
+        "line_number": result.line_number,
+        "product_name": result.product_name,
+        "variant_title": result.variant_title,
     }
 
 
@@ -922,89 +921,37 @@ Rules:
 # RESOLVE LINE NUMBER TO SHOPIFY LINE ID
 # ============================================================
 
-def resolve_remove_line_node(
-    state: CommerceState,
-) -> dict:
-    """
-    Retrieve the live Shopify cart and convert the customer's
-    one-based line number into the actual Shopify cart line ID.
-    """
+def _normalize_match_text(value: str | None) -> list[str]:
+    import re
+    tokens = re.findall(r"[a-z0-9]+", (value or "").lower())
+    # very small normalization so "shoe" matches "shoes" without bringing
+    # fuzzy LLM reasoning into a mutation selector.
+    return [token[:-1] if token.endswith("s") and len(token) > 3 else token for token in tokens]
 
-    logger.info(
-        "Executing remove cart line resolver node."
-    )
 
-    cart_id = state.get(
-        "cart_id"
-    )
+def _selector_matches(query: str | None, candidate: str | None) -> bool:
+    query_tokens = _normalize_match_text(query)
+    candidate_tokens = _normalize_match_text(candidate)
+    return bool(query_tokens) and set(query_tokens).issubset(set(candidate_tokens))
 
+
+def resolve_remove_line_node(state: CommerceState) -> dict:
+    """Resolve a user-visible selector to exactly one live Shopify line ID."""
+    logger.info("Executing remove cart line resolver node.")
+    cart_id = state.get("cart_id")
     if not cart_id:
-        return {
-            "response": (
-                "No active shopping cart was found."
-            ),
-            "cart_changed": False,
-        }
+        return {"response": "No active shopping cart was found.", "cart_changed": False}
 
-    line_number = state.get(
-        "line_number"
-    )
-
-    if line_number is None:
-        return {
-            "response": (
-                "I could not determine which cart line "
-                "you want to remove."
-            ),
-            "cart_changed": False,
-        }
-
-    result = get_cart.invoke(
-        {
-            "cart_id": cart_id,
-        }
-    )
-
+    result = get_cart.invoke({"cart_id": cart_id})
     if not result.get("success"):
-        return {
-            "response": result.get(
-                "message",
-                "Unable to retrieve the cart.",
-            ),
-            "cart_changed": False,
-        }
-
-    cart = result.get(
-        "cart"
-    )
-
-    if not cart:
-        return {
-            "response": (
-                "Unable to retrieve the cart."
-            ),
-            "cart_changed": False,
-        }
-
-    raw_lines = cart.get(
-        "lines",
-        []
-    )
-
+        return {"response": result.get("message", "Unable to retrieve the cart."), "cart_changed": False}
+    cart = result.get("cart") or {}
+    raw_lines = cart.get("lines", [])
     if isinstance(raw_lines, dict):
-        if isinstance(
-            raw_lines.get("nodes"),
-            list,
-        ):
+        if isinstance(raw_lines.get("nodes"), list):
             lines = raw_lines["nodes"]
-        elif isinstance(
-            raw_lines.get("edges"),
-            list,
-        ):
-            lines = [
-                edge.get("node", {})
-                for edge in raw_lines["edges"]
-            ]
+        elif isinstance(raw_lines.get("edges"), list):
+            lines = [edge.get("node", {}) for edge in raw_lines["edges"]]
         else:
             lines = []
     elif isinstance(raw_lines, list):
@@ -1013,67 +960,61 @@ def resolve_remove_line_node(
         lines = []
 
     if not lines:
-        return {
-            "response": (
-                "Your cart is empty."
-            ),
-            "cart_changed": False,
-        }
+        return {"response": "Your cart is empty.", "cart_changed": False}
 
-    if (
-        line_number < 1
-        or line_number > len(lines)
-    ):
-        return {
-            "response": (
-                f"Cart line {line_number} does not exist. "
-                f"Your cart currently has {len(lines)} item(s)."
-            ),
-            "cart_changed": False,
-        }
+    line_number = state.get("line_number")
+    if line_number is not None:
+        if line_number < 1 or line_number > len(lines):
+            return {
+                "response": f"Cart line {line_number} does not exist. Your cart currently has {len(lines)} item(s).",
+                "cart_changed": False,
+            }
+        matches = [lines[line_number - 1]]
+    else:
+        product_name = state.get("product_name")
+        variant_title = state.get("variant_title")
+        matches = []
+        for line in lines:
+            merchandise = line.get("merchandise", {}) or {}
+            product = merchandise.get("product", {}) or {}
+            current_product = product.get("title") or line.get("title") or ""
+            current_variant = merchandise.get("title") or line.get("variant_title") or ""
+            product_ok = True if not product_name else _selector_matches(product_name, current_product)
+            variant_ok = True if not variant_title else _selector_matches(variant_title, current_variant)
+            if product_ok and variant_ok:
+                matches.append(line)
 
-    selected_line = lines[
-        line_number - 1
-    ]
+        if not matches:
+            selector = product_name or variant_title or "requested item"
+            return {
+                "response": f"I could not find {selector} in your current cart.",
+                "cart_changed": False,
+            }
+        if len(matches) > 1:
+            labels = []
+            for line in matches:
+                merchandise = line.get("merchandise", {}) or {}
+                product = merchandise.get("product", {}) or {}
+                label = product.get("title") or "Product"
+                if merchandise.get("title"):
+                    label += f" ({merchandise.get('title')})"
+                labels.append(label)
+            return {
+                "response": "Multiple cart items match that description: " + ", ".join(labels) + ". Please specify the variant or cart line number.",
+                "cart_changed": False,
+            }
 
-    line_id = selected_line.get(
-        "id"
-    )
-
+    selected_line = matches[0]
+    line_id = selected_line.get("id")
     if not line_id:
-        return {
-            "response": (
-                "Unable to identify the selected cart line."
-            ),
-            "cart_changed": False,
-        }
-
-    merchandise = selected_line.get(
-        "merchandise",
-        {}
-    )
-
-    product = merchandise.get(
-        "product",
-        {}
-    )
-
-    product_name = product.get(
-        "title"
-    )
-
-    variant_title = merchandise.get(
-        "title"
-    )
-
-    logger.info(
-        "Cart line resolved successfully for removal."
-    )
-
+        return {"response": "Unable to identify the selected cart line.", "cart_changed": False}
+    merchandise = selected_line.get("merchandise", {}) or {}
+    product = merchandise.get("product", {}) or {}
+    logger.info("Cart line resolved successfully for removal.")
     return {
         "line_id": line_id,
-        "product_name": product_name,
-        "variant_title": variant_title,
+        "product_name": product.get("title"),
+        "variant_title": merchandise.get("title"),
     }
 
 

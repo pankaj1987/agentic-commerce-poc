@@ -5,6 +5,7 @@ class ProductSearchRequest(BaseModel):
     query: str = Field(
         ...,
         min_length=1,
+        max_length=500,
         description="Product search query",
     )
 

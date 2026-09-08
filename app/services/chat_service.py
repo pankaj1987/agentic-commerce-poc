@@ -19,6 +19,8 @@ from app.persistence.repositories.session_repository import (
 from app.services.session_service import (
     SessionService,
 )
+from app.security.context import SecurityContext, bind_security_context
+from app.security.guardrails import InputGuardrail
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ class ChatService:
         message: str,
         session_id: str | None = None,
         user_id: str | None = None,
+        security_context: SecurityContext | None = None,
     ) -> dict[str, Any]:
         """
         Process one customer conversation turn.
@@ -67,10 +70,12 @@ class ChatService:
             else ""
         )
 
-        if not normalized_message:
-            raise ValueError(
-                "Chat message cannot be empty."
-            )
+        guardrail_result = InputGuardrail.validate_message(normalized_message)
+        if not guardrail_result.allowed:
+            raise ValueError(guardrail_result.reason or "The request was blocked by input guardrails.")
+
+        if security_context is None or not security_context.is_authenticated:
+            raise PermissionError("Authentication is required for chat.")
 
         # ========================================================
         # STEP 1
@@ -185,12 +190,17 @@ class ChatService:
         # INVOKE GRAPH
         # ========================================================
 
+        def invoke_graph():
+            # ContextVars create a request-scoped security boundary that is
+            # visible to LangChain tools invoked inside the graph.
+            with bind_security_context(security_context):
+                return commerce_graph.invoke(initial_state, config)
+
         try:
-            result = await run_in_threadpool(
-                commerce_graph.invoke,
-                initial_state,
-                config,
-            )
+            result = await run_in_threadpool(invoke_graph)
+
+        except PermissionError:
+            raise
 
         except Exception:
             logger.exception(

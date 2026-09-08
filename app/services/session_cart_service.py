@@ -14,8 +14,9 @@ class SessionCartService:
     @staticmethod
     def _resolve_session(
         session_id: str | None,
+        user_id: str,
     ) -> CommerceSession:
-        return SessionService.get_or_create_session(session_id)
+        return SessionService.get_or_create_session(session_id, user_id=user_id)
 
     @staticmethod
     def _public_result(
@@ -60,10 +61,11 @@ class SessionCartService:
     @staticmethod
     def initialize_cart(
         session_id: str | None,
+        user_id: str,
     ) -> dict:
         """Create/reuse the cart for one public commerce session."""
 
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
 
         if commerce_session.cart_id:
             existing = CartService.get_cart(commerce_session.cart_id)
@@ -82,8 +84,9 @@ class SessionCartService:
     @staticmethod
     def get_cart(
         session_id: str,
+        user_id: str,
     ) -> dict:
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
 
         if not commerce_session.cart_id:
             return {
@@ -102,8 +105,9 @@ class SessionCartService:
         session_id: str,
         variant_id: str,
         quantity: int,
+        user_id: str,
     ) -> dict:
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
 
         if not commerce_session.cart_id:
             commerce_session, create_result = (
@@ -128,8 +132,9 @@ class SessionCartService:
         session_id: str,
         line_id: str,
         quantity: int,
+        user_id: str,
     ) -> dict:
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
         if not commerce_session.cart_id:
             return {
                 "success": False,
@@ -149,8 +154,9 @@ class SessionCartService:
     def remove_item(
         session_id: str,
         line_id: str,
+        user_id: str,
     ) -> dict:
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
         if not commerce_session.cart_id:
             return {
                 "success": False,
@@ -169,8 +175,9 @@ class SessionCartService:
     def apply_discount(
         session_id: str,
         discount_code: str,
+        user_id: str,
     ) -> dict:
-        commerce_session = SessionCartService._resolve_session(session_id)
+        commerce_session = SessionCartService._resolve_session(session_id, user_id)
         if not commerce_session.cart_id:
             return {
                 "success": False,
