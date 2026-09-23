@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     database_url: str
     langgraph_checkpoint_database_url: str
 
+    # Phase 5A security. dev_header is ONLY for local POC use.
+    auth_mode: str = "dev_header"
+    dev_user_id: str | None = None
+    dev_shopify_customer_id: str | None = None
+    dev_user_roles: str = "customer"
+
+    # Business/security guardrail. Keep this at or below the quantity
+    # behavior supported by the current storefront implementation.
+    max_cart_item_quantity: int = 50
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

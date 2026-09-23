@@ -7,6 +7,7 @@ from app.tools.cart_tools import (
     update_quantity,
 )
 from app.tools.product_tools import find_product_variant
+from app.security.validation import validate_quantity
 
 
 class CartService:
@@ -131,11 +132,13 @@ class CartService:
                 "message": "Product variant ID is required.",
             }
 
-        # Validate quantity
-        if quantity <= 0:
+        # Validate quantity at the deterministic service boundary.
+        try:
+            quantity = validate_quantity(int(quantity))
+        except (TypeError, ValueError) as exc:
             return {
                 "success": False,
-                "message": "Quantity must be greater than zero.",
+                "message": str(exc),
             }
 
         client = ShopifyCartClient()
@@ -212,10 +215,12 @@ class CartService:
                 "message": "Cart line ID is required.",
             }
 
-        if quantity <= 0:
+        try:
+            quantity = validate_quantity(int(quantity))
+        except (TypeError, ValueError) as exc:
             return {
                 "success": False,
-                "message": "Quantity must be greater than zero.",
+                "message": str(exc),
             }
 
         return update_quantity.invoke(

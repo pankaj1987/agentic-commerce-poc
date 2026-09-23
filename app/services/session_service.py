@@ -25,24 +25,19 @@ class SessionService:
         session_id: str | None,
         user_id: str | None = None,
     ) -> CommerceSession:
-        # First request: create a new commerce session.
+        if not user_id or not user_id.strip():
+            raise PermissionError("Authenticated user is required for a commerce session.")
+
+        # First request: create a new commerce session owned by this user.
         if not session_id:
-            return (
-                SessionRepository.create_session(
-                    user_id=user_id
-                )
-            )
+            return SessionRepository.create_session(user_id=user_id.strip())
 
         normalized_session_id = (
             session_id.strip()
         )
 
         if not normalized_session_id:
-            return (
-                SessionRepository.create_session(
-                    user_id=user_id
-                )
-            )
+            return SessionRepository.create_session(user_id=user_id.strip())
 
         commerce_session = (
             SessionRepository.get_session(
@@ -64,15 +59,17 @@ class SessionService:
                 "The commerce session is not active."
             )
 
-        # Future authentication enhancement:
-        # when user_id is mandatory, validate ownership here.
-        if (
-            user_id is not None
-            and commerce_session.user_id is not None
-            and commerce_session.user_id != user_id
-        ):
+        # Phase 5A: a session is never transferable between users.
+        # Legacy sessions with no owner are intentionally rejected rather than
+        # silently claimed by the first caller who knows the session ID.
+        if not commerce_session.user_id:
             raise PermissionError(
-                "The commerce session does not belong to this user."
+                "This legacy session has no authenticated owner. Start a new session."
+            )
+
+        if commerce_session.user_id != user_id.strip():
+            raise PermissionError(
+                "The commerce session does not belong to this authenticated user."
             )
 
         return commerce_session

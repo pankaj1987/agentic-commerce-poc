@@ -1,6 +1,8 @@
 from langchain_core.tools import tool
 
 from app.clients.shopify_cart_client import ShopifyCartClient
+from app.security.tool_authorization import authorize_current_tool
+from app.security.validation import validate_quantity
 
 
 @tool
@@ -10,6 +12,7 @@ def create_cart() -> dict:
     Returns:
         Newly created Shopify cart information.
     """
+    authorize_current_tool("create_cart")
     client = ShopifyCartClient()
     cart = client.create_cart()
 
@@ -30,6 +33,7 @@ def get_cart(cart_id: str) -> dict:
         Standardized cart-tool response with success flag
         and the current Shopify cart payload.
     """
+    authorize_current_tool("get_cart")
     client = ShopifyCartClient()
     cart = client.get_cart(cart_id)
 
@@ -61,10 +65,13 @@ def add_to_cart(
         variant_id: Shopify product variant ID.
         quantity: Quantity to add.
     """
-    if quantity <= 0:
+    authorize_current_tool("add_to_cart")
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
         return {
             "success": False,
-            "message": "Quantity must be greater than zero.",
+            "message": str(exc),
         }
 
     client = ShopifyCartClient()
@@ -83,6 +90,7 @@ def add_to_cart(
 @tool
 def calculate_cart(cart_id: str) -> dict:
     """Retrieve the current calculated cart totals from Shopify."""
+    authorize_current_tool("calculate_cart")
     client = ShopifyCartClient()
     cart = client.get_cart(cart_id)
 
@@ -112,6 +120,7 @@ def remove_from_cart(
         cart_id: Shopify cart ID.
         line_id: Shopify cart line ID.
     """
+    authorize_current_tool("remove_from_cart")
     client = ShopifyCartClient()
     cart = client.remove_from_cart(
         cart_id=cart_id,
@@ -165,19 +174,19 @@ def update_quantity(
     Returns:
         Updated Shopify cart when exactly one cart line can be identified.
     """
+    authorize_current_tool("update_quantity")
     if not cart_id or not cart_id.strip():
         return {
             "success": False,
             "message": "Cart ID is required.",
         }
 
-    if quantity <= 0:
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
         return {
             "success": False,
-            "message": (
-                "Quantity must be greater than zero. "
-                "Use remove_from_cart to remove an item."
-            ),
+            "message": str(exc) + " Use remove_from_cart to remove an item.",
         }
 
     client = ShopifyCartClient()
@@ -414,6 +423,7 @@ def apply_promotion(
         Shopify considers the code applicable and the updated
         cart totals.
     """
+    authorize_current_tool("apply_discount_code")
     if not discount_code or not discount_code.strip():
         return {
             "success": False,

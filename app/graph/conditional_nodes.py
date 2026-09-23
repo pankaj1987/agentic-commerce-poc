@@ -11,7 +11,10 @@ from app.clients.shopify_client import (
     ShopifyClient,
 )
 from app.config.llm import get_llm
+from app.config.settings import settings
 from app.graph.state import CommerceState
+from app.security.tool_authorization import authorize_current_tool
+from app.security.validation import validate_explicit_cart_quantity, validate_quantity
 from app.tools.cart_tools import (
     add_to_cart,
     create_cart,
@@ -47,6 +50,7 @@ class ConditionalInventoryAddRequest(
     quantity: int = Field(
         default=1,
         ge=1,
+        le=settings.max_cart_item_quantity,
         description=(
             "Quantity that should be added if enough "
             "inventory exists."
@@ -82,6 +86,11 @@ def extract_conditional_inventory_request(
                 "was provided."
             )
         }
+
+    try:
+        explicit_quantity = validate_explicit_cart_quantity(user_message)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     llm = get_llm()
 
@@ -156,7 +165,7 @@ quantity = 2
             result.variant_title
         ),
         "quantity": (
-            result.quantity
+            explicit_quantity if explicit_quantity is not None else result.quantity
         ),
     }
 
@@ -189,6 +198,7 @@ def resolve_conditional_variant_node(
             )
         }
 
+    authorize_current_tool("search_products")
     client = ShopifyClient()
 
     try:
@@ -299,6 +309,11 @@ def conditional_inventory_check_node(
         or 1
     )
 
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
     if not variant_id:
         return {
             "error": (
@@ -306,6 +321,7 @@ def conditional_inventory_check_node(
             )
         }
 
+    authorize_current_tool("check_inventory")
     client = ShopifyClient()
 
     try:
@@ -479,6 +495,14 @@ def conditional_add_cart_node(
         )
         or 1
     )
+
+    try:
+        quantity = validate_quantity(int(quantity))
+    except (TypeError, ValueError) as exc:
+        return {
+            "response": str(exc),
+            "cart_changed": False,
+        }
 
     result = add_to_cart.invoke(
         {

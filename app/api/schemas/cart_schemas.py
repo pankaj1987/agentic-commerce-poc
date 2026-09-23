@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.config.settings import settings
+
 
 class CartResponse(BaseModel):
     """Public cart response.
@@ -36,11 +38,13 @@ class AddCartItemRequest(BaseModel):
     variant_id: str = Field(
         ...,
         min_length=1,
+        max_length=512,
         description="Shopify product variant ID.",
     )
     quantity: int = Field(
         default=1,
-        gt=0,
+        ge=1,
+        le=settings.max_cart_item_quantity,
         description="Quantity to add.",
     )
 
@@ -54,11 +58,13 @@ class UpdateCartItemRequest(BaseModel):
     line_id: str = Field(
         ...,
         min_length=1,
+        max_length=512,
         description="Shopify cart line ID.",
     )
     quantity: int = Field(
         ...,
-        gt=0,
+        ge=1,
+        le=settings.max_cart_item_quantity,
         description="New quantity.",
     )
 
@@ -72,6 +78,7 @@ class RemoveCartItemRequest(BaseModel):
     line_id: str = Field(
         ...,
         min_length=1,
+        max_length=512,
         description="Shopify cart line ID.",
     )
 
@@ -85,5 +92,6 @@ class PromotionRequest(BaseModel):
     discount_code: str = Field(
         ...,
         min_length=1,
+        max_length=64,
         description="Shopify discount code.",
     )

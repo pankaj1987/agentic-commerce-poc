@@ -2,6 +2,7 @@ import re
 from typing import Any
 
 from app.clients.shopify_client import ShopifyClient
+from app.security.validation import validate_order_number
 
 
 class ShopifyOrderClient:
@@ -12,7 +13,7 @@ class ShopifyOrderClient:
 
     @staticmethod
     def _normalize_order_name(order_number: str) -> str:
-        value = (order_number or "").strip()
+        value = validate_order_number(order_number).strip()
         if not value:
             raise ValueError("Order number is required.")
         if value.lower().startswith("order "):
@@ -49,6 +50,7 @@ class ShopifyOrderClient:
             restockable
             returnStatus
             email
+            customer { id email }
             totalPriceSet { shopMoney { amount currencyCode } }
             currentSubtotalPriceSet { shopMoney { amount currencyCode } }
             currentTotalTaxSet { shopMoney { amount currencyCode } }
@@ -127,6 +129,8 @@ class ShopifyOrderClient:
             "restockable": order.get("restockable"),
             "return_status": order.get("returnStatus"),
             "email": order.get("email"),
+            "customer": order.get("customer"),
+            "customer_id": (order.get("customer") or {}).get("id"),
             "total": self._money(order.get("totalPriceSet")),
             "subtotal": self._money(order.get("currentSubtotalPriceSet")),
             "tax": self._money(order.get("currentTotalTaxSet")),
@@ -155,13 +159,18 @@ class ShopifyOrderClient:
                 return self._normalize_order(order)
         return self._normalize_order(orders[0])
 
-    def get_order_history(self, customer_email: str, first: int = 10) -> list[dict]:
-        email = (customer_email or "").strip()
-        if not email or "@" not in email:
-            raise ValueError("A valid customer email is required for order history.")
+    def get_order_history_by_customer_id(self, shopify_customer_id: str, first: int = 10) -> list[dict]:
+        customer_id = (shopify_customer_id or "").strip()
+        if not customer_id:
+            raise ValueError("Shopify customer ID is required for order history.")
         first = max(1, min(first, 20))
+
+        # Query through Order search so Phase 5A remains within the order-read
+        # boundary and does not require a separate customer-profile read just
+        # to discover history. Shopify customer GIDs end with the numeric ID.
+        customer_search_id = customer_id.rsplit("/", 1)[-1]
         query = f"""
-        query GetOrderHistory($query: String!, $first: Int!) {{
+        query GetCustomerOrderHistory($query: String!, $first: Int!) {{
             orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {{
                 nodes {{ {self._order_fields()} }}
             }}
@@ -169,12 +178,13 @@ class ShopifyOrderClient:
         """
         data = self.client.execute_query(
             query,
-            {"query": f"email:{email}", "first": first},
+            {"query": f"customer_id:{customer_search_id}", "first": first},
         )
-        return [
-            self._normalize_order(order)
-            for order in data["orders"]["nodes"]
-        ]
+        orders = [self._normalize_order(order) for order in data["orders"]["nodes"]]
+
+        # Defense in depth: even after server-side filtering, verify ownership
+        # on every returned order before exposing it to the caller.
+        return [order for order in orders if order and order.get("customer_id") == customer_id]
 
     def get_cancellation_facts(self, order_number: str) -> dict[str, Any]:
         order = self.get_order_by_name(order_number)

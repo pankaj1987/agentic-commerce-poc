@@ -1,6 +1,7 @@
 from langchain.tools import tool
 
 from app.clients.shopify_client import ShopifyClient
+from app.security.tool_authorization import authorize_current_tool
 
 
 @tool
@@ -21,6 +22,7 @@ def search_products(
         Matching products with product details and pricing.
     """
 
+    authorize_current_tool("search_products")
     shopify_client = ShopifyClient()
 
     products = shopify_client.search_products(
@@ -52,6 +54,7 @@ def get_product(product_id: str):
     Returns:
         Product details including variants, pricing and inventory.
     """
+    authorize_current_tool("search_products")
     shopify_client = ShopifyClient()
     return shopify_client.get_product(product_id)
 
@@ -80,6 +83,7 @@ def check_inventory(
     Returns:
         Current inventory information.
     """
+    authorize_current_tool("check_inventory")
     shopify_client = ShopifyClient()
 
     variant = shopify_client.find_product_variant(
@@ -128,6 +132,7 @@ def find_product_variant(
         Matching product/variant information.
     """
 
+    authorize_current_tool("search_products")
     shopify_client = ShopifyClient()
 
     result = shopify_client.find_product_variant(
